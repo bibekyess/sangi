@@ -19,6 +19,42 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 - Apply schema changes only with `npm run db:push` (`drizzle-kit push`). Never use migrations: do not run `drizzle-kit generate` or `drizzle-kit migrate`, and do not create or commit a migrations folder.
 - This is a development project. There is no backwards compatibility and the data is worthless. Prefer data loss: never backfill, migrate or preserve existing rows, and never spend effort on keeping the old database working. Every schema change means a clean state.
 
+## Forms
+
+Every form follows one pipeline: Drizzle table → zod schema → server action → react-hook-form client. `components/bot-dialog.tsx` + `actions/bot.ts` are the reference implementation.
+
+Stack: `zod` 4, `drizzle-zod`, `react-hook-form`, `@hookform/resolvers` pinned to `~5.2.2` (newer versions pull an optional `@typeschema` peer that conflicts with zod 4). Never install with `--legacy-peer-deps` or `--force`.
+
+### Schema
+
+- Derive the validation schema from the table with `createInsertSchema` from `drizzle-zod`, next to the table in `db/schema.ts`. Never hand-write a zod schema that duplicates a table.
+- Refine columns with callbacks that add `.trim()`, limits and user-facing messages, then `.pick()` only the fields a user edits. Never include `id`, `userId`, timestamps or other server-owned columns.
+- Export the type as `z.infer<typeof insertXSchema>` and use it on both client and server.
+- `db/schema.ts` is imported by client components, so keep it free of `server-only` imports. Database access stays in `db/index.ts`.
+
+### Server action
+
+- One file per entity in `actions/<entity>.ts` with `"use server"` at the top.
+- Start every action with `const { isAuthenticated, userId } = await auth()` from `@clerk/nextjs/server`. Take `userId` from the session only, never from the client input.
+- Re-validate the input with `schema.safeParse()`. Server actions are public endpoints, so client validation is not enough.
+- Return a discriminated union, `{ success: true, ... } | { success: false, error: string }`, rather than throwing for expected failures. Call `revalidatePath` (or `refresh`/`updateTag`, see the Next docs) after the write.
+
+### Client component
+
+- `useForm<T>({ resolver: zodResolver(schema), defaultValues })`, with one `Controller` per field.
+- Lay out fields with shadcn `FieldGroup` > `Field` > `FieldLabel` + control + `FieldError`. Put `data-invalid={fieldState.invalid}` on `Field` and `aria-invalid={fieldState.invalid}` on the control.
+- Nullable columns need `value={field.value ?? ""}` on the control.
+- Every button inside a `<form>` that does not submit needs `type="button"`.
+- Show pending state with `disabled={form.formState.isSubmitting}` and a `Spinner` with `data-icon="inline-start"`. Button has no loading prop.
+- Report results with `toast.add({ title, description, type })` from `@/components/ui/toast` (Base UI, not sonner). On success, `form.reset()` with fresh defaults.
+- Generate client-side defaults such as seeds (`nanoid()`) in a factory function so each reset gets a new value.
+
+### Forms in dialogs
+
+- The dialog owns its trigger: accept `children: React.ReactElement` and render `<DialogTrigger render={children} />`, so a server component page can wrap its button.
+- Control `open` with state so the dialog can close itself after a successful submit.
+- Give the `<form>` an `id` and put the submit button in `DialogFooter` with `form="<id>"`. Render Cancel as `<DialogClose render={<Button variant="outline" />}>`.
+
 ## DiceBear
 
 Use DiceBear 10. Documentation: https://www.dicebear.com/llms.txt
