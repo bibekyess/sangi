@@ -1,22 +1,15 @@
-import { Show, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs"
+import { UserButton } from "@clerk/nextjs"
+import { auth } from "@clerk/nextjs/server"
 
 import { Button } from "@/components/ui/button"
 
-export default function Page() {
+export default async function Page() {
+  await auth.protect()
+
   return (
     <div className="flex min-h-svh flex-col">
       <header className="flex items-center justify-end gap-2 border-b p-4">
-        <Show when="signed-out">
-          <SignInButton>
-            <Button variant="ghost">Sign in</Button>
-          </SignInButton>
-          <SignUpButton>
-            <Button>Sign up</Button>
-          </SignUpButton>
-        </Show>
-        <Show when="signed-in">
-          <UserButton />
-        </Show>
+        <UserButton />
       </header>
       <div className="flex max-w-md min-w-0 flex-col gap-4 p-6 text-sm leading-loose">
         <div>
