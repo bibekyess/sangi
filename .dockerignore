@@ -1,0 +1,4 @@
+# Some of these skills will have some built-in nextjs templates, which confuses deployment platforms
+# like railways, vercel so deployment may fail
+.claude
+.agents
