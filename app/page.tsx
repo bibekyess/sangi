@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server"
 import { PlusIcon } from "lucide-react"
 
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { ChatAvatar } from "@/components/chat-avatar"
 import { Button } from "@/components/ui/button"
 import {
   Empty,
@@ -20,10 +20,11 @@ export default async function Page() {
       <Empty>
         <EmptyHeader>
           <EmptyMedia>
-            <Avatar size="lg">
-              <AvatarImage src="/favicon.ico" alt="Sangi" />
-              <AvatarFallback>S</AvatarFallback>
-            </Avatar>
+            <ChatAvatar
+              seed={crypto.randomUUID()}
+              animated
+              className="size-16"
+            />
           </EmptyMedia>
           <EmptyTitle>Meet your first bot</EmptyTitle>
           <EmptyDescription>
