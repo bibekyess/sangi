@@ -1,21 +1,33 @@
 // Define tables here, then run `npm run db:push`.
 // https://orm.drizzle.team/docs/sql-schema-declaration
-import { pgTable, text, timestamp } from "drizzle-orm/pg-core"
+import { index, pgTable, text, timestamp } from "drizzle-orm/pg-core"
+import { nanoid } from "nanoid"
 
-export const users = pgTable("users", {
-  // Clerk user ID, e.g. "user_2abc..."
-  id: text("id").primaryKey(),
-  email: text("email").notNull().unique(),
-  name: text("name"),
-  imageUrl: text("image_url"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow()
-    .$onUpdate(() => new Date()),
-})
+export const bots = pgTable(
+  "bots",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => nanoid()),
+    // Clerk user ID, e.g. "user_2abc..."
+    userId: text("user_id").notNull(),
+    name: text("name").notNull(),
+    // Seed for the bot's generated face
+    avatar: text("avatar")
+      .notNull()
+      .$defaultFn(() => nanoid()),
+    // What the bot is for, in a phrase
+    job: text("job").notNull(),
+    // How it should go about the job
+    instructions: text("instructions"),
+    // Sandbox provider ID, created lazily
+    sandboxId: text("sandbox_id"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("bots_user_id_idx").on(table.userId)],
+)
 
-export type User = typeof users.$inferSelect
-export type NewUser = typeof users.$inferInsert
+export type Bot = typeof bots.$inferSelect
+export type NewBot = typeof bots.$inferInsert
