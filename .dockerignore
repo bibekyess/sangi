@@ -2,3 +2,18 @@
 # like railways, vercel so deployment may fail
 .claude
 .agents
+
+# Rebuilt inside the image
+node_modules
+.next
+.trigger
+tsconfig.tsbuildinfo
+
+# Secrets reach the container through compose, never the image
+.env*
+
+.git
+.clerk
+.neon
+Dockerfile
+docker-compose.yaml

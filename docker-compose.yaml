@@ -1,0 +1,20 @@
+# Run with: docker compose --env-file .env.production up -d --build
+#
+# --env-file feeds the NEXT_PUBLIC_* build args below; env_file passes the
+# whole file to the running container. Postgres (Neon), the LLM, Daytona and
+# Trigger.dev Cloud stay external
+
+services:
+  web:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:?set in .env.production}
+        NEXT_PUBLIC_CLERK_SIGN_IN_URL: ${NEXT_PUBLIC_CLERK_SIGN_IN_URL:-}
+        NEXT_PUBLIC_CLERK_SIGN_UP_URL: ${NEXT_PUBLIC_CLERK_SIGN_UP_URL:-}
+        NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: ${NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL:-}
+        NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: ${NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL:-}
+    env_file: .env.production
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    restart: unless-stopped
