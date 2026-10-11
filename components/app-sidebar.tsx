@@ -16,6 +16,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarRail,
 } from "@/components/ui/sidebar"
 import { getChats } from "@/queries/bots"
 
@@ -23,26 +24,34 @@ export async function AppSidebar() {
   const chats = await getChats()
 
   return (
-    <Sidebar>
+    <Sidebar collapsible="icon">
       <SidebarHeader>
         <div className="flex justify-end">
           <NewChatMenu />
         </div>
         <ChatSearch chats={chats} />
       </SidebarHeader>
-      <SidebarContent>
+      {/* Collapsed, the chat list still has to scroll. */}
+      <SidebarContent className="group-data-[collapsible=icon]:overflow-auto">
         <SidebarGroup>
           <SidebarGroupLabel>Chats</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {chats.map((chat) => (
                 <SidebarMenuItem key={chat.id}>
+                  {/* Collapsed, the avatar shrinks so the button's hover
+                      background shows around it like the other icons. */}
                   <SidebarMenuButton
                     size="lg"
+                    tooltip={chat.name ?? chat.bot.name}
+                    className="group-data-[collapsible=icon]:justify-center"
                     render={<Link href={`/chats/${chat.id}`} />}
                   >
-                    <ChatAvatar seed={chat.bot.avatar} />
-                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <ChatAvatar
+                      seed={chat.bot.avatar}
+                      className="group-data-[collapsible=icon]:size-6"
+                    />
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5 group-data-[collapsible=icon]:hidden">
                       <div className="flex items-baseline gap-2">
                         <span className="truncate font-medium">
                           {chat.name ?? chat.bot.name}
@@ -71,7 +80,7 @@ export async function AppSidebar() {
                 the whole menu button. */}
             <SidebarMenuButton
               render={<div />}
-              className="p-0 has-focus-visible:ring-2 has-aria-expanded:bg-sidebar-accent has-aria-expanded:text-sidebar-accent-foreground *:data-clerk-component:size-full"
+              className="p-0 has-focus-visible:ring-2 has-aria-expanded:bg-sidebar-accent has-aria-expanded:text-sidebar-accent-foreground group-data-[collapsible=icon]:p-0! *:data-clerk-component:size-full"
             >
               <UserButton
                 showName
@@ -83,7 +92,7 @@ export async function AppSidebar() {
                     userButtonBox: "w-full min-w-0 justify-start gap-2",
                     userButtonAvatarBox: "order-first size-6 shrink-0",
                     userButtonOuterIdentifier:
-                      "truncate ps-0 text-sm font-normal text-inherit",
+                      "truncate ps-0 text-sm font-normal text-inherit group-data-[collapsible=icon]:hidden",
                   },
                 }}
               />
@@ -91,6 +100,7 @@ export async function AppSidebar() {
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
+      <SidebarRail />
     </Sidebar>
   )
 }
