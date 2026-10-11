@@ -19,4 +19,8 @@ export default defineConfig({
     },
   },
   dirs: ["trigger"],
+  build: {
+    // Resolves "server-only" to its empty module, so tasks can import lib/ai
+    conditions: ["react-server"],
+  },
 });
