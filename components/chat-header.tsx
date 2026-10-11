@@ -1,7 +1,6 @@
-import { MonitorIcon } from "lucide-react"
-
 import { BotDialog } from "@/components/bot-dialog"
 import { ChatAvatar } from "@/components/chat-avatar"
+import { ComputerPanelToggle } from "@/components/computer-panel"
 import { Button } from "@/components/ui/button"
 import type { ChatWithBot } from "@/queries/chats"
 
@@ -22,15 +21,7 @@ export function ChatHeader({ chat }: { chat: ChatWithBot }) {
           </Button>
         </BotDialog>
       </h1>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label="Computer"
-        className="ml-auto text-muted-foreground"
-      >
-        <MonitorIcon />
-      </Button>
+      <ComputerPanelToggle />
     </header>
   )
 }

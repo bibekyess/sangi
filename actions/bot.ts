@@ -15,7 +15,13 @@ import {
   type Chat,
   type InsertBot,
 } from "@/db/schema"
-import { createBotSandbox, deleteBotSandbox } from "@/lib/daytona"
+import {
+  connectBotSandbox,
+  createBotSandbox,
+  deleteBotSandbox,
+  getDesktopUrl,
+  startDesktop,
+} from "@/lib/daytona"
 
 type CreateBotResult =
   { success: true; bot: Bot; chat: Chat } | { success: false; error: string }
@@ -167,4 +173,34 @@ export async function deleteBot(botId: string): Promise<DeleteBotResult> {
   revalidatePath("/", "layout")
 
   return { success: true }
+}
+
+type GetBotDesktopUrlResult =
+  { success: true; url: string } | { success: false; error: string }
+
+export async function getBotDesktopUrl(
+  botId: string
+): Promise<GetBotDesktopUrlResult> {
+  const { isAuthenticated, userId } = await auth()
+  if (!isAuthenticated) {
+    return { success: false, error: "Sign in to see your bot's screen." }
+  }
+
+  const [bot] = await db
+    .select({ sandboxId: bots.sandboxId })
+    .from(bots)
+    .where(and(eq(bots.id, botId), eq(bots.userId, userId)))
+
+  if (!bot?.sandboxId) {
+    return { success: false, error: "That bot doesn't have a computer." }
+  }
+
+  try {
+    const sandbox = await connectBotSandbox(bot.sandboxId)
+    await startDesktop(sandbox)
+    return { success: true, url: await getDesktopUrl(sandbox) }
+  } catch (error) {
+    console.error("Failed to open desktop", error)
+    return { success: false, error: "Couldn't reach your bot's computer." }
+  }
 }

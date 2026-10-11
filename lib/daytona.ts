@@ -63,3 +63,16 @@ export async function startDesktop(sandbox: Sandbox) {
   }
   throw new Error("The desktop didn't start in time.")
 }
+
+// noVNC's web client, served by the desktop that startDesktop brings up
+const NOVNC_PORT = 6080
+
+// A signed link carries its own token, so the browser can load it in an
+// iframe. It's bound to the noVNC port, unlike the sandbox-wide preview token
+export async function getDesktopUrl(sandbox: Sandbox) {
+  const { url } = await sandbox.getSignedPreviewUrl(NOVNC_PORT, 60 * 60)
+  const vnc = new URL("/vnc.html", url)
+  vnc.searchParams.set("autoconnect", "true")
+  vnc.searchParams.set("resize", "scale")
+  return vnc.toString()
+}
