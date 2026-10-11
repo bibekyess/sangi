@@ -3,7 +3,9 @@
 import { useChat } from "@ai-sdk/react"
 import {
   useLoadTranscript,
+  usePendingMessages,
   useTriggerChatTransport,
+  type InjectedMessage,
 } from "@trigger.dev/sdk/chat/react"
 
 import {
@@ -82,18 +84,41 @@ function ChatView({
   initialMessages: ChatUIMessage[]
   transport: ChatTransport
 }) {
-  const { messages, sendMessage, status, stop } = useChat<ChatUIMessage>({
-    id: chatId,
-    messages: initialMessages,
+  const { messages, sendMessage, setMessages, status, stop } =
+    useChat<ChatUIMessage>({
+      id: chatId,
+      messages: initialMessages,
+      transport,
+    })
+  // A message sent mid-reply goes to the running turn, which folds it in at
+  // its next step. Sending it through useChat would open a second stream of
+  // the same reply
+  const pending = usePendingMessages({
     transport,
+    chatId,
+    status,
+    messages,
+    setMessages,
+    sendMessage,
   })
 
   function handleSubmit({ text }: PromptInputMessage) {
     if (!text.trim()) {
       return
     }
-    sendMessage({ text })
+    pending.steer(text)
   }
+
+  // A steered message also shows inside the reply it joined, so skip it if the
+  // transcript keeps a copy of its own
+  const injectedIds = new Set(
+    messages.flatMap((message) =>
+      message.parts.flatMap(pending.getInjectedMessageIds)
+    )
+  )
+  const visibleMessages = messages.filter(
+    (message) => !injectedIds.has(message.id)
+  )
 
   const lastMessage = messages.at(-1)
   // Between sending and the first streamed part there's nothing to show yet
@@ -107,28 +132,48 @@ function ChatView({
     <div className="flex min-h-0 flex-1 flex-col">
       <Conversation className="min-h-0 flex-1">
         <ConversationContent className="mx-auto w-full max-w-3xl">
-          {messages.length === 0 ? (
+          {visibleMessages.length === 0 ? (
             <ConversationEmptyState
               title="Start a conversation"
               description="Type a message below to begin"
             />
           ) : (
-            messages.map((message) => (
-              <Message from={message.role} key={message.id}>
-                <MessageContent>
-                  {groupParts(message.parts).map((group) =>
-                    group.kind === "tools" ? (
-                      <ToolSteps key={group.key} parts={group.parts} />
-                    ) : (
-                      <MessageResponse key={group.key}>
-                        {group.text}
-                      </MessageResponse>
-                    )
-                  )}
-                </MessageContent>
-              </Message>
-            ))
+            visibleMessages.flatMap((message) =>
+              splitAtInjections(
+                message.id,
+                groupParts(message.parts, pending.getInjectedMessages)
+              ).map((segment) =>
+                segment.kind === "injected" ? (
+                  <Message from="user" key={segment.key}>
+                    <MessageContent>{segment.text}</MessageContent>
+                  </Message>
+                ) : (
+                  <Message from={message.role} key={segment.key}>
+                    <MessageContent>
+                      {segment.groups.map((group) =>
+                        group.kind === "tools" ? (
+                          <ToolSteps key={group.key} parts={group.parts} />
+                        ) : (
+                          <MessageResponse key={group.key}>
+                            {group.text}
+                          </MessageResponse>
+                        )
+                      )}
+                    </MessageContent>
+                  </Message>
+                )
+              )
+            )
           )}
+          {/* Read from the reply rather than message.injected, which only
+              catches up a render after the marker arrives */}
+          {pending.pending
+            .filter((message) => !injectedIds.has(message.id))
+            .map((message) => (
+              <Message from="user" key={message.id} className="opacity-60">
+                <MessageContent>{message.text}</MessageContent>
+              </Message>
+            ))}
           {isWaiting && (
             <Shimmer className="text-sm" duration={1.5}>
               Thinking…
@@ -143,7 +188,12 @@ function ChatView({
             <PromptInputTextarea placeholder="Send a message..." />
           </PromptInputBody>
           <PromptInputFooter className="justify-end">
-            <PromptInputSubmit status={status} onStop={stop} />
+            {/* Until the reply starts there is no turn to steer, so wait */}
+            <PromptInputSubmit
+              status={status}
+              onStop={stop}
+              disabled={status === "submitted"}
+            />
           </PromptInputFooter>
         </PromptInput>
       </div>
@@ -154,13 +204,22 @@ function ChatView({
 type PartGroup =
   | { kind: "text"; key: string; text: string }
   | { kind: "tools"; key: string; parts: AgentStepPart[] }
+  | { kind: "injected"; key: string; text: string }
 
 // Consecutive thoughts and tool calls render as one timeline between the text
-// around them
-function groupParts(parts: ChatUIMessage["parts"]) {
+// around them. Messages the user sent mid-reply mark where the agent took them in
+function groupParts(
+  parts: ChatUIMessage["parts"],
+  getInjectedMessages: (part: unknown) => InjectedMessage[]
+) {
   const groups: PartGroup[] = []
   parts.forEach((part, i) => {
-    if (part.type === "text") {
+    const injected = getInjectedMessages(part)
+    if (injected.length > 0) {
+      injected.forEach((message) =>
+        groups.push({ kind: "injected", key: message.id, text: message.text })
+      )
+    } else if (part.type === "text") {
       if (part.text.trim()) {
         groups.push({ kind: "text", key: `text-${i}`, text: part.text })
       }
@@ -182,4 +241,34 @@ function groupParts(parts: ChatUIMessage["parts"]) {
     }
   })
   return groups
+}
+
+type Segment =
+  | { kind: "injected"; key: string; text: string }
+  | {
+      kind: "reply"
+      key: string
+      groups: Exclude<PartGroup, { kind: "injected" }>[]
+    }
+
+// A reply steered mid-way shows as reply, user message, reply
+function splitAtInjections(messageId: string, groups: PartGroup[]) {
+  const segments: Segment[] = []
+  for (const group of groups) {
+    if (group.kind === "injected") {
+      segments.push(group)
+      continue
+    }
+    const last = segments.at(-1)
+    if (last?.kind === "reply") {
+      last.groups.push(group)
+    } else {
+      segments.push({
+        kind: "reply",
+        key: `${messageId}-${group.key}`,
+        groups: [group],
+      })
+    }
+  }
+  return segments
 }

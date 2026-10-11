@@ -13,6 +13,13 @@ function ThemeProvider({
       defaultTheme="system"
       enableSystem
       disableTransitionOnChange
+      // next-themes renders an inline <script> to set the theme before paint.
+      // React 19 warns when that script is rendered on the client, so mark it
+      // inert there. The server-rendered copy has already run, and the
+      // provider applies the theme in an effect on the client.
+      scriptProps={{
+        type: typeof window === "undefined" ? "text/javascript" : "text/plain",
+      }}
       {...props}
     >
       <ThemeHotkey />

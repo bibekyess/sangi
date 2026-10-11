@@ -1,5 +1,5 @@
 import { chat, type InferChatUIMessageFromTools } from "@trigger.dev/sdk/ai"
-import { stepCountIs } from "ai"
+import { stepCountIs, type ModelMessage } from "ai"
 
 import { db } from "@/db"
 import { getChatModel } from "@/lib/ai"
@@ -68,6 +68,11 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
     const bot = await getChatBot(chatId)
     return createSandboxTools({ chatId, sandboxId: bot.sandboxId })
   },
+  // Messages sent while a reply streams join it at the next step boundary
+  // rather than starting a turn of their own
+  pendingMessages: {
+    shouldInject: () => true,
+  },
   // Set every turn rather than once per run, so edits to the bot apply to the
   // next message and continuation runs get the prompt too
   onTurnStart: async ({ chatId }) => {
@@ -75,8 +80,14 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   },
   // streamText comes from the run argument so the managed options apply,
   // including the system prompt set above
-  run: async ({ messages, tools, signal, streamText }) =>
-    streamText({
+  run: async ({ messages, tools, signal, streamText }) => {
+    // Steering messages, by the step they were injected after. The managed
+    // prepareStep appends them to the messages it hands ours, which rebuilds
+    // the history and would otherwise drop them
+    const steered = new Map<number, ModelMessage[]>()
+    const known = new Set<ModelMessage>(messages)
+
+    return streamText({
       model: getChatModel(),
       messages,
       tools,
@@ -88,12 +99,29 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
       // hold all earlier steps too, as in AI SDK 5/6. AI SDK 7 gives each step
       // only its own, so from the third step on the model would never see
       // another tool result, and would repeat the same call forever
-      prepareStep: ({ steps }) => ({
-        messages: pruneScreenshots([
-          ...messages,
-          ...steps.flatMap((step) => step.response.messages),
-        ]),
-      }),
+      prepareStep: ({ messages: current, steps }) => {
+        // Steps only add assistant and tool messages, so a user message not
+        // seen before was injected at this boundary
+        const injected = current.filter(
+          (message) => message.role === "user" && !known.has(message)
+        )
+        if (injected.length > 0) {
+          injected.forEach((message) => known.add(message))
+          steered.set(steps.length - 1, injected)
+        }
+        return {
+          messages: pruneScreenshots([
+            ...messages,
+            // Arrived before the first step
+            ...(steered.get(-1) ?? []),
+            ...steps.flatMap((step, i) => [
+              ...step.response.messages,
+              ...(steered.get(i) ?? []),
+            ]),
+          ]),
+        }
+      },
       ...thinkingOptions,
-    }),
+    })
+  },
 })
