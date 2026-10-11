@@ -1,8 +1,8 @@
-import Link from "next/link"
 import { UserButton } from "@clerk/nextjs"
 import { formatDistanceToNowStrict } from "date-fns"
 
 import { ChatAvatar } from "@/components/chat-avatar"
+import { ChatMenuButton } from "@/components/chat-menu-button"
 import { ChatSearch } from "@/components/chat-search"
 import { NewChatMenu } from "@/components/new-chat-menu"
 import {
@@ -41,11 +41,11 @@ export async function AppSidebar() {
                 <SidebarMenuItem key={chat.id}>
                   {/* Collapsed, the avatar shrinks so the button's hover
                       background shows around it like the other icons. */}
-                  <SidebarMenuButton
+                  <ChatMenuButton
+                    chatId={chat.id}
                     size="lg"
                     tooltip={chat.name ?? chat.bot.name}
                     className="group-data-[collapsible=icon]:justify-center"
-                    render={<Link href={`/chats/${chat.id}`} />}
                   >
                     <ChatAvatar
                       seed={chat.bot.avatar}
@@ -64,7 +64,7 @@ export async function AppSidebar() {
                         {chat.lastMessagePreview}
                       </span>
                     </div>
-                  </SidebarMenuButton>
+                  </ChatMenuButton>
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
@@ -80,7 +80,7 @@ export async function AppSidebar() {
                 the whole menu button. */}
             <SidebarMenuButton
               render={<div />}
-              className="p-0 has-focus-visible:ring-2 has-aria-expanded:bg-sidebar-accent has-aria-expanded:text-sidebar-accent-foreground group-data-[collapsible=icon]:p-0! *:data-clerk-component:size-full"
+              className="p-0 group-data-[collapsible=icon]:p-0! has-focus-visible:ring-2 has-aria-expanded:bg-sidebar-accent has-aria-expanded:text-sidebar-accent-foreground *:data-clerk-component:size-full"
             >
               <UserButton
                 showName
