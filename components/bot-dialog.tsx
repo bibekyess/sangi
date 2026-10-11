@@ -2,13 +2,15 @@
 
 import * as React from "react"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { ShuffleIcon } from "lucide-react"
+import { ShuffleIcon, Trash2Icon } from "lucide-react"
 import { nanoid } from "nanoid"
+import { useRouter } from "next/navigation"
 import { Controller, useForm, useWatch } from "react-hook-form"
 
-import { createBot } from "@/actions/bot"
-import { insertBotSchema, type InsertBot } from "@/db/schema"
+import { createBot, updateBot } from "@/actions/bot"
+import { insertBotSchema, type Bot, type InsertBot } from "@/db/schema"
 import { ChatAvatar } from "@/components/chat-avatar"
+import { DeleteBotDialog } from "@/components/delete-bot-dialog"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -70,26 +72,47 @@ function emptyBot(): InsertBot {
   return { name: "", avatar: nanoid(), job: "", instructions: "" }
 }
 
+function botValues(bot: Bot): InsertBot {
+  return {
+    name: bot.name,
+    avatar: bot.avatar,
+    job: bot.job,
+    instructions: bot.instructions,
+  }
+}
+
+// Creates a bot, or edits `bot` when one is passed
 function BotDialog({
+  bot,
   children,
   open: openProp,
   onOpenChange,
 }: {
+  bot?: Bot
   children?: React.ReactElement
   open?: boolean
   onOpenChange?: (open: boolean) => void
 }) {
+  const router = useRouter()
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
   const open = openProp ?? uncontrolledOpen
 
+  function defaultValues() {
+    return bot ? botValues(bot) : emptyBot()
+  }
+
   function setOpen(next: boolean) {
+    // Edits start from the bot as it is now, not from an abandoned draft
+    if (next && bot) {
+      form.reset(defaultValues())
+    }
     setUncontrolledOpen(next)
     onOpenChange?.(next)
   }
 
   const form = useForm<InsertBot>({
     resolver: zodResolver(insertBotSchema),
-    defaultValues: emptyBot(),
+    defaultValues: defaultValues(),
   })
   const avatar = useWatch({ control: form.control, name: "avatar" })
 
@@ -103,19 +126,32 @@ function BotDialog({
   }
 
   async function onSubmit(values: InsertBot) {
-    const result = await createBot(values)
+    const result = bot
+      ? await updateBot(bot.id, values)
+      : await createBot(values)
     if (!result.success) {
       toast.add({
-        title: "Couldn't create bot",
+        title: bot ? "Couldn't save bot" : "Couldn't create bot",
         description: result.error,
         type: "error",
       })
       return
     }
 
-    toast.add({ title: `${result.bot.name} is ready`, type: "success" })
+    toast.add({
+      title: bot
+        ? `${result.bot.name} is updated`
+        : `${result.bot.name} is ready`,
+      type: "success",
+    })
     setOpen(false)
-    form.reset(emptyBot())
+    form.reset(bot ? botValues(result.bot) : emptyBot())
+  }
+
+  // The bot's chat is gone, so leave its page before it can 404
+  function onDeleted() {
+    setOpen(false)
+    router.push("/")
   }
 
   return (
@@ -123,26 +159,30 @@ function BotDialog({
       {children && <DialogTrigger render={children} />}
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>New bot</DialogTitle>
+          <DialogTitle>{bot ? "Edit bot" : "New bot"}</DialogTitle>
           <DialogDescription>
-            Give it a face, a name, and a job to do.
+            {bot
+              ? "Change its face, name, or job."
+              : "Give it a face, a name, and a job to do."}
           </DialogDescription>
         </DialogHeader>
         <form id="bot-form" onSubmit={form.handleSubmit(onSubmit)}>
           <FieldGroup>
-            <div className="flex flex-wrap gap-2">
-              {presets.map((preset) => (
-                <Button
-                  key={preset.job}
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => applyPreset(preset)}
-                >
-                  {preset.job}
-                </Button>
-              ))}
-            </div>
+            {!bot && (
+              <div className="flex flex-wrap gap-2">
+                {presets.map((preset) => (
+                  <Button
+                    key={preset.job}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => applyPreset(preset)}
+                  >
+                    {preset.job}
+                  </Button>
+                ))}
+              </div>
+            )}
             <Item className="p-0">
               <ItemMedia variant="image">
                 <ChatAvatar seed={avatar} className="size-10 rounded-none" />
@@ -228,6 +268,19 @@ function BotDialog({
           </FieldGroup>
         </form>
         <DialogFooter>
+          {bot && (
+            <DeleteBotDialog bot={bot} onDeleted={onDeleted}>
+              <Button
+                type="button"
+                variant="destructive"
+                className="sm:mr-auto"
+                disabled={form.formState.isSubmitting}
+              >
+                <Trash2Icon data-icon="inline-start" />
+                Delete
+              </Button>
+            </DeleteBotDialog>
+          )}
           <DialogClose render={<Button variant="outline" />}>
             Cancel
           </DialogClose>
@@ -239,7 +292,7 @@ function BotDialog({
             {form.formState.isSubmitting && (
               <Spinner data-icon="inline-start" />
             )}
-            Create bot
+            {bot ? "Save changes" : "Create bot"}
           </Button>
         </DialogFooter>
       </DialogContent>
