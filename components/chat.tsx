@@ -32,9 +32,10 @@ import {
 } from "@/components/ai-elements/prompt-input"
 import { Shimmer } from "@/components/ai-elements/shimmer"
 import {
+  isReasoningPart,
   isToolCallPart,
   ToolSteps,
-  type ToolCallPart,
+  type AgentStepPart,
 } from "@/components/tool-call"
 import { Spinner } from "@/components/ui/spinner"
 import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
@@ -152,9 +153,10 @@ function ChatView({
 
 type PartGroup =
   | { kind: "text"; key: string; text: string }
-  | { kind: "tools"; key: string; parts: ToolCallPart[] }
+  | { kind: "tools"; key: string; parts: AgentStepPart[] }
 
-// Consecutive tool calls render as one timeline between the text around them
+// Consecutive thoughts and tool calls render as one timeline between the text
+// around them
 function groupParts(parts: ChatUIMessage["parts"]) {
   const groups: PartGroup[] = []
   parts.forEach((part, i) => {
@@ -162,12 +164,20 @@ function groupParts(parts: ChatUIMessage["parts"]) {
       if (part.text.trim()) {
         groups.push({ kind: "text", key: `text-${i}`, text: part.text })
       }
-    } else if (isToolCallPart(part)) {
+    } else if (isToolCallPart(part) || isReasoningPart(part)) {
+      // Empty thoughts have nothing to show once they finish
+      if (
+        isReasoningPart(part) &&
+        !part.text.trim() &&
+        part.state !== "streaming"
+      ) {
+        return
+      }
       const last = groups.at(-1)
       if (last?.kind === "tools") {
         last.parts.push(part)
       } else {
-        groups.push({ kind: "tools", key: part.toolCallId, parts: [part] })
+        groups.push({ kind: "tools", key: `steps-${i}`, parts: [part] })
       }
     }
   })

@@ -8,6 +8,7 @@ import { z } from "zod"
 
 import { db } from "@/db"
 import { screenshots } from "@/db/schema"
+import { BROWSER_SCRIPT } from "@/lib/browser-script"
 import { connectBotSandbox, startDesktop } from "@/lib/daytona"
 
 // Long outputs are cut to keep the model's context small
@@ -17,8 +18,30 @@ const MAX_LISTED_FILES = 500
 const KEPT_SCREENSHOTS = 3
 // The desktop's X display; commands need it to open windows on screen
 const DESKTOP_ENV = { DISPLAY: ":0" }
-// Roughly how long Chromium takes to show a page after launch
-const BROWSER_SETTLE_MS = 3000
+// Time for the screen to react to an action before it's observed
+const ACTION_SETTLE_MS = 1500
+// A web page can have hundreds of links and buttons
+const MAX_ELEMENTS = 40
+// Where lib/browser-script.ts is uploaded in the sandbox
+const BROWSER_SCRIPT_PATH = "/tmp/sangi-browser.mjs"
+
+// The browser tab on screen, as lib/browser-script.ts reports it
+type BrowserPage = {
+  url: string
+  title: string
+  loading: boolean
+  tabs: number
+}
+
+type BrowserElement = {
+  id: string
+  role: string
+  name: string
+  value?: string
+  states?: string[]
+  // Screen point for mouseClick; missing when scrolled out of view
+  center?: { x: number; y: number }
+}
 
 function truncate(text: string, keep: "head" | "ends" = "head") {
   if (text.length <= MAX_OUTPUT_CHARS) {
@@ -182,6 +205,56 @@ export function createSandboxTools({
     return { screenshotId: row.id, width: row.width, height: row.height }
   }
 
+  // Uploaded once per turn; /tmp is wiped when the sandbox stops
+  let browserScript: Promise<void> | undefined
+
+  // Runs a command of lib/browser-script.ts, which drives Chromium over the
+  // DevTools Protocol from inside the sandbox
+  async function runBrowser<T>(command: string, args: object = {}) {
+    const box = await getDesktop()
+    browserScript ??= box.fs.uploadFile(
+      Buffer.from(BROWSER_SCRIPT),
+      BROWSER_SCRIPT_PATH
+    )
+    browserScript.catch(() => (browserScript = undefined))
+    await browserScript
+
+    const response = await box.process.executeCommand(
+      `node ${BROWSER_SCRIPT_PATH} ${command} ${shellQuote(JSON.stringify(args))}`,
+      undefined,
+      DESKTOP_ENV,
+      60
+    )
+    let result: T | { error: string }
+    try {
+      result = JSON.parse(response.result)
+    } catch {
+      throw new Error(
+        `The browser script failed: ${response.result.slice(0, 500)}`
+      )
+    }
+    if (typeof result === "object" && result && "error" in result) {
+      throw new Error(result.error)
+    }
+    return result as T
+  }
+
+  // A cheap text look at the screen instead of a screenshot: the browser tab
+  // on screen and whether it's still loading, or null if no browser is open
+  async function observeScreen() {
+    try {
+      return await runBrowser<{ browser: BrowserPage | null }>("status")
+    } catch {
+      return { browser: null }
+    }
+  }
+
+  // Lets the screen react, then reports what it looks like now, in text
+  async function afterAction<T extends object>(result: T) {
+    await new Promise((resolve) => setTimeout(resolve, ACTION_SETTLE_MS))
+    return { ...result, ...(await observeScreen()) }
+  }
+
   return {
     bash: tool({
       description:
@@ -287,7 +360,7 @@ export function createSandboxTools({
 
     openBrowser: tool({
       description:
-        "Open a web page in Chromium on the desktop. Starts the browser if needed, otherwise opens a new tab. Call viewScreen afterwards to see the page.",
+        "Open a web page in Chromium on the desktop, in a new tab, starting the browser if needed. Waits for the page to load and returns its address and title, not a screenshot.",
       inputSchema: z.object({
         url: z
           .string()
@@ -296,21 +369,78 @@ export function createSandboxTools({
       }),
       execute: async ({ url }) => {
         const address = /^[a-z][a-z\d+.-]*:/i.test(url) ? url : `https://${url}`
-        const box = await getDesktop()
-        // Backgrounded so the command returns while the browser keeps running
-        await box.process.executeCommand(
-          `nohup chromium --no-first-run --no-default-browser-check --start-maximized ${shellQuote(address)} >/tmp/chromium.log 2>&1 &`,
-          undefined,
-          DESKTOP_ENV,
-          30
-        )
-        await new Promise((resolve) => setTimeout(resolve, BROWSER_SETTLE_MS))
-        return { url: address }
+        return runBrowser<{ browser: BrowserPage }>("open", { url: address })
+      },
+    }),
+
+    findElements: tool({
+      description:
+        "List the elements of the web page on screen, such as buttons, links, text fields and headings, with their IDs, roles, names, values, states and screen center points. On-screen elements come first. Much cheaper than a screenshot, so use it to find what to click or fill in. Browser only.",
+      inputSchema: z.object({
+        name: z
+          .string()
+          .optional()
+          .describe("Only elements whose name contains this text, any case"),
+        role: z
+          .string()
+          .optional()
+          .describe(
+            "Only elements with this role: button, link, textbox, searchbox, combobox, checkbox, radio, tab, option, menuitem, heading, …"
+          ),
+      }),
+      execute: ({ name, role }) =>
+        runBrowser<{
+          browser: BrowserPage
+          elements: BrowserElement[]
+          // Matches before the limit, so the model knows to narrow its search
+          total: number
+        }>("elements", { name, role, limit: MAX_ELEMENTS }),
+    }),
+
+    clickElement: tool({
+      description:
+        "Click an element found with findElements, by its ID: scrolls it into view and clicks its center. IDs last until the page changes. Returns the browser's page afterwards, not a screenshot.",
+      inputSchema: z.object({
+        id: z.string().min(1).describe("The element's ID from findElements"),
+      }),
+      execute: async ({ id }) => {
+        await runBrowser("click", { id })
+        return afterAction({ id })
+      },
+    }),
+
+    setElementText: tool({
+      description:
+        "Replace the text of a text field found with findElements, by its ID, as if typed. Doesn't submit; press enter or click the form's button after. Returns the field's new value and the browser's page, not a screenshot.",
+      inputSchema: z.object({
+        id: z.string().min(1).describe("The text field's ID from findElements"),
+        text: z.string().describe("The field's new text"),
+      }),
+      execute: async ({ id, text }) => {
+        const { value } = await runBrowser<{ value: string }>("fill", {
+          id,
+          text,
+        })
+        return afterAction({ id, value })
+      },
+    }),
+
+    readPage: tool({
+      description:
+        "Read the visible text of the whole web page on screen, including parts scrolled out of view. Much cheaper than a screenshot, so use it to read content, results and messages. Browser only.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        const { browser, text } = await runBrowser<{
+          browser: BrowserPage
+          text: string
+        }>("text")
+        return { browser, ...truncate(text) }
       },
     }),
 
     mouseClick: tool({
-      description: "Click the mouse at a point on the screen.",
+      description:
+        "Click the mouse at a point on the screen. Returns the browser's page afterwards, if one is open, not a screenshot.",
       inputSchema: z.object({
         ...coordinates,
         button: z.enum(["left", "right", "middle"]).default("left"),
@@ -319,23 +449,24 @@ export function createSandboxTools({
       execute: async ({ x, y, button, double }) => {
         const box = await getDesktop()
         await box.computerUse.mouse.click(x, y, button, double)
-        return { x, y }
+        return afterAction({ x, y })
       },
     }),
 
     mouseMove: tool({
-      description: "Move the mouse pointer to a point on the screen.",
+      description:
+        "Move the mouse pointer to a point on the screen, e.g. to hover. Returns the browser's page afterwards, if one is open, not a screenshot.",
       inputSchema: z.object(coordinates),
       execute: async ({ x, y }) => {
         const box = await getDesktop()
         const position = await box.computerUse.mouse.move(x, y)
-        return { x: position.x ?? x, y: position.y ?? y }
+        return afterAction({ x: position.x ?? x, y: position.y ?? y })
       },
     }),
 
     mouseDrag: tool({
       description:
-        "Press the left button at one point, drag to another and release.",
+        "Press the left button at one point, drag to another and release. Returns the browser's page afterwards, if one is open, not a screenshot.",
       inputSchema: z.object({
         startX: coordinates.x,
         startY: coordinates.y,
@@ -345,12 +476,13 @@ export function createSandboxTools({
       execute: async ({ startX, startY, endX, endY }) => {
         const box = await getDesktop()
         await box.computerUse.mouse.drag(startX, startY, endX, endY)
-        return { x: endX, y: endY }
+        return afterAction({ x: endX, y: endY })
       },
     }),
 
     mouseScroll: tool({
-      description: "Scroll the mouse wheel at a point on the screen.",
+      description:
+        "Scroll the mouse wheel at a point on the screen. Returns the browser's page afterwards, if one is open, not a screenshot.",
       inputSchema: z.object({
         ...coordinates,
         direction: z.enum(["up", "down", "left", "right"]),
@@ -365,26 +497,26 @@ export function createSandboxTools({
       execute: async ({ x, y, direction, amount }) => {
         const box = await getDesktop()
         await box.computerUse.mouse.scroll(x, y, direction, amount)
-        return { x, y }
+        return afterAction({ x, y, direction, amount })
       },
     }),
 
     keyboardType: tool({
       description:
-        "Type text into the focused window. Newlines press Enter; tabs aren't allowed.",
+        "Type text into the focused window. Newlines press Enter; tabs aren't allowed. Returns the browser's page afterwards, if one is open, not a screenshot.",
       inputSchema: z.object({
         text: z.string().min(1),
       }),
       execute: async ({ text }) => {
         const box = await getDesktop()
         await box.computerUse.keyboard.type(text)
-        return { characters: text.length }
+        return afterAction({ characters: text.length })
       },
     }),
 
     keyboardPress: tool({
       description:
-        "Press a key, optionally with modifiers, e.g. key 'enter', or key 'c' with modifiers ['ctrl'].",
+        "Press a key, optionally with modifiers, e.g. key 'enter', or key 'c' with modifiers ['ctrl']. Returns the browser's page afterwards, if one is open, not a screenshot.",
       inputSchema: z.object({
         key: z
           .string()
@@ -397,13 +529,13 @@ export function createSandboxTools({
       execute: async ({ key, modifiers }) => {
         const box = await getDesktop()
         await box.computerUse.keyboard.press(key, modifiers)
-        return { key, modifiers }
+        return afterAction({ key, modifiers })
       },
     }),
 
     viewScreen: tool({
       description:
-        "Take a screenshot so you can see the screen. Only you see it, so use this to check your work between actions.",
+        "Take a screenshot so you can see the screen. Only you see it. Screenshots are expensive, so use this only when text isn't enough: for programs other than the browser, to check a page's layout or images, or to work out why an action didn't do what you expected.",
       inputSchema: z.object({}),
       outputSchema: screenshotOutput,
       execute: () => takeScreenshot(),

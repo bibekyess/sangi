@@ -10,6 +10,27 @@ import {
   type SandboxTools,
 } from "@/lib/sandbox-tools"
 
+// Qwen3 thinks before every reply and tool call, and acts better for it. The
+// server returns the thinking as `reasoning`, which the provider streams as
+// reasoning parts and sends back as `reasoning_content` on the next step, so
+// each step's thinking follows the tool results it saw.
+// Sampling follows Qwen's recommendation for thinking mode
+const thinkingOptions = {
+  temperature: 0.6,
+  topP: 0.95,
+  providerOptions: {
+    freellm: {
+      // Not in the AI SDK's call options, so passed straight to the server
+      top_k: 20,
+      min_p: 0,
+      chat_template_kwargs: { enable_thinking: true },
+      // One action per step, so the next one is decided after seeing the
+      // result of this one rather than blind
+      parallel_tool_calls: false,
+    },
+  },
+}
+
 export type ChatUIMessage = InferChatUIMessageFromTools<SandboxTools>
 
 // The chat's first bot, the same one its header shows. Direct chats have only
@@ -31,6 +52,8 @@ async function getChatBot(chatId: string) {
 export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   id: "chat",
   uiMessageStreamOptions: {
+    // Stream the model's thinking so the chat can show it, collapsed
+    sendReasoning: true,
     // Also names tool failures in the chat; the default hides every one
     // behind "An error occurred." Logged in full, shown without the stack
     onError: (error) => {
@@ -39,7 +62,7 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
       return message.slice(0, 500) || "Something went wrong."
     },
   },
-  // Declared here, not only on streamText, so screenshots' toModelOutput is
+  // Declared here, not only on streamText, so viewScreen's toModelOutput is
   // re-applied when earlier turns are converted back for the model
   tools: async ({ chatId }) => {
     const bot = await getChatBot(chatId)
@@ -58,8 +81,19 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
       messages,
       tools,
       abortSignal: signal,
-      // Computer use takes many small steps: look, act, look again
-      stopWhen: stepCountIs(40),
-      prepareStep: ({ messages }) => ({ messages: pruneScreenshots(messages) }),
+      // Computer use takes many small steps: think, act, look again
+      stopWhen: stepCountIs(60),
+      // Rebuilt from every step rather than taken from the argument: the SDK's
+      // managed prepareStep (4.7.3) expects each step's response.messages to
+      // hold all earlier steps too, as in AI SDK 5/6. AI SDK 7 gives each step
+      // only its own, so from the third step on the model would never see
+      // another tool result, and would repeat the same call forever
+      prepareStep: ({ steps }) => ({
+        messages: pruneScreenshots([
+          ...messages,
+          ...steps.flatMap((step) => step.response.messages),
+        ]),
+      }),
+      ...thinkingOptions,
     }),
 })

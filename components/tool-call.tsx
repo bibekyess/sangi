@@ -1,6 +1,8 @@
 "use client"
 
 import {
+  BookOpenTextIcon,
+  BrainIcon,
   ChevronRightIcon,
   EyeIcon,
   FileIcon,
@@ -14,12 +16,16 @@ import {
   MousePointer2Icon,
   MousePointerClickIcon,
   MoveIcon,
+  ScanSearchIcon,
   ScrollTextIcon,
+  SquareMousePointerIcon,
   SquareTerminalIcon,
+  TextCursorInputIcon,
   TriangleAlertIcon,
   type LucideIcon,
 } from "lucide-react"
 import Image from "next/image"
+import { useEffect, useRef, useState } from "react"
 import type { BundledLanguage } from "shiki"
 
 import {
@@ -30,6 +36,7 @@ import {
   CodeBlockHeader,
   CodeBlockTitle,
 } from "@/components/ai-elements/code-block"
+import { MessageResponse } from "@/components/ai-elements/message"
 import { Shimmer } from "@/components/ai-elements/shimmer"
 import {
   Terminal,
@@ -52,8 +59,16 @@ import type { ChatUIMessage } from "@/trigger/chat"
 type MessagePart = ChatUIMessage["parts"][number]
 export type ToolCallPart = Extract<MessagePart, { type: `tool-${string}` }>
 
+export type ReasoningPart = Extract<MessagePart, { type: "reasoning" }>
+// A step in the agent's loop: a thought, or an action and what it returned
+export type AgentStepPart = ToolCallPart | ReasoningPart
+
 export function isToolCallPart(part: MessagePart): part is ToolCallPart {
   return part.type.startsWith("tool-")
+}
+
+export function isReasoningPart(part: MessagePart): part is ReasoningPart {
+  return part.type === "reasoning"
 }
 
 type StepStatus = "running" | "done" | "error"
@@ -70,15 +85,67 @@ function stepStatus(part: ToolCallPart): StepStatus {
   }
 }
 
-// A run of consecutive tool calls, drawn as one timeline like an agent log
-export function ToolSteps({ parts }: { parts: ToolCallPart[] }) {
+// A run of consecutive thoughts and tool calls, drawn as one timeline like an
+// agent log: think, act, observe, think again
+export function ToolSteps({ parts }: { parts: AgentStepPart[] }) {
   return (
     <div className="not-prose relative flex flex-col gap-0.5 before:absolute before:top-4 before:bottom-4 before:left-[18px] before:w-px before:bg-border">
-      {parts.map((part) => (
-        <ToolCall key={part.toolCallId} part={part} />
-      ))}
+      {parts.map((part, i) =>
+        isReasoningPart(part) ? (
+          // Reasoning IDs repeat across steps, but a part never moves
+          <ThinkingStep key={`reasoning-${i}`} part={part} />
+        ) : (
+          <ToolCall key={part.toolCallId} part={part} />
+        )
+      )}
     </div>
   )
+}
+
+// The model's thinking before a step, collapsed until clicked
+function ThinkingStep({ part }: { part: ReasoningPart }) {
+  const isThinking = part.state === "streaming"
+  const seconds = useThinkingSeconds(isThinking)
+  const text = part.text.trim()
+
+  return (
+    <Step
+      icon={BrainIcon}
+      status={isThinking ? "running" : "done"}
+      label={
+        isThinking
+          ? "Thinking"
+          : seconds === undefined
+            ? "Thought"
+            : `Thought for ${seconds}s`
+      }
+    >
+      {text && (
+        <MessageResponse className="text-sm text-muted-foreground">
+          {text}
+        </MessageResponse>
+      )}
+    </Step>
+  )
+}
+
+// Measured while it streams; transcripts loaded later don't record it
+function useThinkingSeconds(isThinking: boolean) {
+  const startRef = useRef<number | null>(null)
+  const [seconds, setSeconds] = useState<number>()
+
+  useEffect(() => {
+    if (isThinking) {
+      startRef.current ??= Date.now()
+    } else if (startRef.current !== null) {
+      setSeconds(
+        Math.max(1, Math.round((Date.now() - startRef.current) / 1000))
+      )
+      startRef.current = null
+    }
+  }, [isThinking])
+
+  return seconds
 }
 
 function ToolCall({ part }: { part: ToolCallPart }) {
@@ -188,6 +255,57 @@ function ToolCall({ part }: { part: ToolCallPart }) {
           error={error}
         />
       )
+
+    case "tool-findElements": {
+      const { name, role } = part.input ?? {}
+      const output = part.state === "output-available" ? part.output : null
+      return (
+        <Step
+          icon={ScanSearchIcon}
+          status={status}
+          label={status === "running" ? "Finding elements" : "Found elements"}
+          detail={[role, name && `“${name}”`].filter(Boolean).join(" ")}
+          meta={output ? pluralize(output.total, "element") : null}
+          error={error}
+        />
+      )
+    }
+
+    case "tool-clickElement":
+      return (
+        <Step
+          icon={SquareMousePointerIcon}
+          status={status}
+          label={status === "running" ? "Clicking element" : "Clicked element"}
+          error={error}
+        />
+      )
+
+    case "tool-setElementText":
+      return (
+        <Step
+          icon={TextCursorInputIcon}
+          status={status}
+          label={status === "running" ? "Filling in" : "Filled in"}
+          detail={
+            part.input?.text !== undefined ? `“${part.input.text}”` : undefined
+          }
+          error={error}
+        />
+      )
+
+    case "tool-readPage": {
+      const output = part.state === "output-available" ? part.output : null
+      return (
+        <Step
+          icon={BookOpenTextIcon}
+          status={status}
+          label={status === "running" ? "Reading page" : "Read page"}
+          detail={output?.browser.title || output?.browser.url}
+          error={error}
+        />
+      )
+    }
 
     case "tool-mouseClick": {
       const { x, y, button, double } = part.input ?? {}
