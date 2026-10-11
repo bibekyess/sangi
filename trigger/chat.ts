@@ -1,9 +1,18 @@
-import { chat, type InferChatUIMessageFromTools } from "@trigger.dev/sdk/ai"
-import { stepCountIs, type ModelMessage } from "ai"
+import { chat } from "@trigger.dev/sdk/ai"
+import {
+  generateId,
+  generateText,
+  stepCountIs,
+  type InferUITools,
+  type ModelMessage,
+  type UIMessage,
+} from "ai"
+import { z } from "zod"
 
 import { db } from "@/db"
 import { getChatModel } from "@/lib/ai"
 import { buildBotPrompt } from "@/lib/bot-prompt"
+import { summaryMessage } from "@/lib/compaction"
 import {
   createSandboxTools,
   pruneScreenshots,
@@ -31,7 +40,41 @@ const thinkingOptions = {
   },
 }
 
-export type ChatUIMessage = InferChatUIMessageFromTools<SandboxTools>
+// Context size at which the history is summarised. Well under the model's
+// window, since answers degrade long before it fills
+const COMPACT_AT_TOKENS = 80_000
+
+const SUMMARY_REQUEST = `Summarise the conversation so far for yourself, to carry on from it with the earlier messages gone. Keep what the user wants and any instructions they gave, what has been done and found, decisions made, and where things stand now: open pages, files, logins and anything left to do. Write it as notes, not a reply to the user.`
+
+// Thinking is switched off: a summary needs none and it would only be cut
+async function summarizeHistory(messages: ModelMessage[]) {
+  const result = await generateText({
+    model: getChatModel(),
+    messages: [
+      ...pruneScreenshots(messages),
+      { role: "user", content: SUMMARY_REQUEST },
+    ],
+    providerOptions: {
+      freellm: { chat_template_kwargs: { enable_thinking: false } },
+    },
+  })
+  return result.text
+}
+
+// Streamed, not kept, while the history is summarised. The runtime sends
+// status and totalTokens when it compacts on its own; /compact adds the
+// summary it left so the chat can show it without reloading
+export type CompactionData = {
+  status: "compacting" | "complete"
+  totalTokens?: number
+  summary?: { id: string; text: string }
+}
+
+export type ChatUIMessage = UIMessage<
+  unknown,
+  { compaction: CompactionData },
+  InferUITools<SandboxTools>
+>
 
 // The chat's first bot, the same one its header shows. Direct chats have only
 // one; group chats speak as the first to join until they get their own prompt
@@ -72,6 +115,50 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   // rather than starting a turn of their own
   pendingMessages: {
     shouldInject: () => true,
+  },
+  // Once the context grows past the threshold, the model gets a summary in
+  // place of the earlier turns. The chat still shows them all.
+  // Only between turns: mid-turn compaction rebuilds from each step's
+  // response.messages, which AI SDK 7 trims to the step's own (see run), and
+  // the rebuild in run would undo it anyway
+  compaction: {
+    shouldCompact: ({ source, totalTokens }) =>
+      source === "outer" && (totalTokens ?? 0) > COMPACT_AT_TOKENS,
+    summarize: ({ messages }) => summarizeHistory(messages),
+  },
+  // Commands typed in the chat rather than sent to the model
+  actionSchema: z.discriminatedUnion("type", [
+    z.object({ type: z.literal("clear") }),
+    z.object({ type: z.literal("compact") }),
+  ]),
+  // The default storage rewrites the whole transcript, so a reload shows
+  // what these leave too
+  onAction: async ({ action, messages }) => {
+    // Starts the model afresh once a long chat crowds its context
+    if (action.type === "clear") {
+      chat.history.set([])
+    }
+    // Like clear, but the summary carries the conversation on
+    if (action.type === "compact" && messages.length > 0) {
+      const chunkId = generateId()
+      await chat.stream.append({
+        type: "data-compaction",
+        id: chunkId,
+        data: { status: "compacting" } satisfies CompactionData,
+        transient: true,
+      })
+      const summary = {
+        id: generateId(),
+        text: await summarizeHistory(messages),
+      }
+      chat.history.set([summaryMessage(summary.id, summary.text)])
+      await chat.stream.append({
+        type: "data-compaction",
+        id: chunkId,
+        data: { status: "complete", summary } satisfies CompactionData,
+        transient: true,
+      })
+    }
   },
   // Set every turn rather than once per run, so edits to the bot apply to the
   // next message and continuation runs get the prompt too

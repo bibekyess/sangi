@@ -4,6 +4,7 @@ import * as React from "react"
 import { useChat } from "@ai-sdk/react"
 import type { ChatSessionPersistedState } from "@trigger.dev/sdk/chat"
 import {
+  useChatActions,
   useLoadTranscript,
   usePendingMessages,
   useTriggerChatTransport,
@@ -42,6 +43,8 @@ import {
   type AgentStepPart,
 } from "@/components/tool-call"
 import { Spinner } from "@/components/ui/spinner"
+import { toast } from "@/components/ui/toast"
+import { summaryMessage } from "@/lib/compaction"
 import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
 
 type ChatTransport = ReturnType<typeof useTriggerChatTransport>
@@ -124,6 +127,12 @@ function ChatView({
   initialMessages: ChatUIMessage[]
   transport: ChatTransport
 }) {
+  // Set while the agent summarises the history, after a long reply or for /compact
+  const [isCompacting, setIsCompacting] = React.useState(false)
+  // Set while /clear or /compact waits on the agent, which isn't a reply
+  const [isRunningCommand, setIsRunningCommand] = React.useState(false)
+  // Whether the running /compact got its summary back
+  const compacted = React.useRef(false)
   const { messages, sendMessage, setMessages, status, stop } =
     useChat<ChatUIMessage>({
       id: chatId,
@@ -131,6 +140,33 @@ function ChatView({
       transport,
       // Picks up a reply that was still streaming when the page loaded
       resume: true,
+      onData: (part) => {
+        if (part.type !== "data-compaction") {
+          return
+        }
+        if (part.data.status === "compacting") {
+          setIsCompacting(true)
+          return
+        }
+        setIsCompacting(false)
+        if (part.data.summary) {
+          // Applied as it arrives, so a /compact picked up after a reload
+          // still replaces the history it summarised
+          const { id, text } = part.data.summary
+          compacted.current = true
+          setMessages([summaryMessage(id, text)])
+        } else {
+          // The agent compacted on its own; the chat still shows everything
+          toast.add({
+            title: "Conversation summarized",
+            description:
+              "The bot now remembers earlier messages as a summary, to keep its answers sharp.",
+          })
+        }
+      },
+      // A stream that ends mid-summary never sends "complete"
+      onFinish: () => setIsCompacting(false),
+      onError: () => setIsCompacting(false),
     })
   // A message sent mid-reply goes to the running turn, which folds it in at
   // its next step. Sending it through useChat would open a second stream of
@@ -144,12 +180,7 @@ function ChatView({
     sendMessage,
   })
 
-  function handleSubmit({ text }: PromptInputMessage) {
-    if (!text.trim()) {
-      return
-    }
-    pending.steer(text)
-  }
+  const { sendAction } = useChatActions({ sendMessage })
 
   // A steered message also shows inside the reply it joined, so skip it if the
   // transcript keeps a copy of its own
@@ -162,13 +193,71 @@ function ChatView({
     (message) => !injectedIds.has(message.id)
   )
 
+  function handleSubmit({ text }: PromptInputMessage) {
+    if (!text.trim()) {
+      return
+    }
+    const command = text.trim()
+    if (command === "/clear" || command === "/compact") {
+      void runCommand(command)
+      return
+    }
+    pending.steer(text)
+  }
+
+  // Both rewrite the history, which a running reply is still adding to
+  async function runCommand(command: "/clear" | "/compact") {
+    if (status !== "ready" && status !== "error") {
+      toast.add({
+        title: `Can't ${command.slice(1)} yet`,
+        description: "Wait for the reply to finish, or stop it, first.",
+        type: "error",
+      })
+      return
+    }
+    if (command === "/compact" && visibleMessages.length === 0) {
+      toast.add({ title: "Nothing to summarize yet", type: "info" })
+      return
+    }
+    setIsRunningCommand(true)
+    try {
+      await (command === "/clear" ? clearHistory() : compactHistory())
+    } finally {
+      setIsRunningCommand(false)
+    }
+  }
+
+  // The agent forgets the conversation so far. The server doesn't push history
+  // edits back, so the list is emptied here to match
+  async function clearHistory() {
+    setMessages([])
+    await sendAction({ type: "clear" })
+  }
+
+  // The agent swaps the conversation for its summary, which then stands in
+  // for it here too
+  async function compactHistory() {
+    compacted.current = false
+    setIsCompacting(true)
+    await sendAction({ type: "compact" })
+    setIsCompacting(false)
+    if (!compacted.current) {
+      toast.add({
+        title: "Couldn't summarize the conversation",
+        description: "Nothing was changed. Try again in a moment.",
+        type: "error",
+      })
+    }
+  }
+
   const lastMessage = messages.at(-1)
   // Between sending and the first streamed part there's nothing to show yet
   const isWaiting =
-    status === "submitted" ||
-    (status === "streaming" &&
-      lastMessage?.role === "assistant" &&
-      !lastMessage.parts.some((part) => part.type !== "step-start"))
+    !isRunningCommand &&
+    (status === "submitted" ||
+      (status === "streaming" &&
+        lastMessage?.role === "assistant" &&
+        !lastMessage.parts.some((part) => part.type !== "step-start")))
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -216,10 +305,16 @@ function ChatView({
                 <MessageContent>{message.text}</MessageContent>
               </Message>
             ))}
-          {isWaiting && (
+          {isCompacting ? (
             <Shimmer className="text-sm" duration={1.5}>
-              Thinking…
+              Summarizing the conversation…
             </Shimmer>
+          ) : (
+            isWaiting && (
+              <Shimmer className="text-sm" duration={1.5}>
+                Thinking…
+              </Shimmer>
+            )
           )}
         </ConversationContent>
         <ConversationScrollButton />
@@ -227,7 +322,7 @@ function ChatView({
       <div className="mx-auto w-full max-w-3xl p-4 pt-0">
         <PromptInput onSubmit={handleSubmit}>
           <PromptInputBody>
-            <PromptInputTextarea placeholder="Send a message..." />
+            <PromptInputTextarea placeholder="Send a message, /compact to summarize or /clear to start over..." />
           </PromptInputBody>
           <PromptInputFooter className="justify-end">
             {/* Until the reply starts there is no turn to steer, so wait */}
