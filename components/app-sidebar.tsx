@@ -1,4 +1,3 @@
-import { UserButton } from "@clerk/nextjs"
 import { formatDistanceToNowStrict } from "date-fns"
 
 import { ChatAvatar } from "@/components/chat-avatar"
@@ -18,6 +17,7 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar"
+import { UserButton } from "@/components/user-button"
 import { getChats } from "@/queries/chats"
 
 export async function AppSidebar() {
