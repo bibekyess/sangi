@@ -14,6 +14,10 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 - Never create branches, worktrees or commits automatically. Only do so when the user explicitly asks for that specific action in the current request.
 - Leave changes uncommited in the working tree on the current branch and let the user decide when and how to commit.
 
+## Browser
+
+- Never use Claude in Chrome (`mcp__claude-in-chrome__*` tools) unless the user explicitly asks for it in the current request. Verify changes with typechecking and code review instead, and let the user check the UI.
+
 ## Database
 
 - Apply schema changes only with `npm run db:push` (`drizzle-kit push`). Never use migrations: do not run `drizzle-kit generate` or `drizzle-kit migrate`, and do not create or commit a migrations folder.
@@ -97,3 +101,4 @@ thing:
 Only JavaScript and the HTTP API have a pre-10 form. The other six cores were
 released in 2026 and never had one, so any older-looking PHP, Python, Rust, Go,
 Dart or C# API attributed to DiceBear is invented rather than outdated.
+
