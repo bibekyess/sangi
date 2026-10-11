@@ -2,6 +2,7 @@
 
 import { auth } from "@clerk/nextjs/server"
 import { and, eq, inArray } from "drizzle-orm"
+import { nanoid } from "nanoid"
 import { revalidatePath } from "next/cache"
 
 import { db } from "@/db"
@@ -14,10 +15,10 @@ import {
   type Chat,
   type InsertBot,
 } from "@/db/schema"
+import { createBotSandbox, deleteBotSandbox } from "@/lib/daytona"
 
 type CreateBotResult =
-  | { success: true; bot: Bot; chat: Chat }
-  | { success: false; error: string }
+  { success: true; bot: Bot; chat: Chat } | { success: false; error: string }
 
 export async function createBot(input: InsertBot): Promise<CreateBotResult> {
   const { isAuthenticated, userId } = await auth()
@@ -31,22 +32,43 @@ export async function createBot(input: InsertBot): Promise<CreateBotResult> {
     return { success: false, error: parsed.error.issues[0].message }
   }
 
+  // Pick the ID up front so the sandbox can be labelled with it
+  const botId = nanoid()
+
+  let sandboxId: string
+  try {
+    sandboxId = await createBotSandbox(botId, userId)
+  } catch (error) {
+    console.error("Failed to create sandbox", error)
+    return { success: false, error: "Couldn't set up your bot. Try again." }
+  }
+
   // Every bot starts with its own direct chat; all three rows land or none do
-  const { bot, chat } = await db.transaction(async (tx) => {
-    const [bot] = await tx
-      .insert(bots)
-      .values({ ...parsed.data, userId })
-      .returning()
+  let created: { bot: Bot; chat: Chat }
+  try {
+    created = await db.transaction(async (tx) => {
+      const [bot] = await tx
+        .insert(bots)
+        .values({ ...parsed.data, id: botId, userId, sandboxId })
+        .returning()
 
-    const [chat] = await tx
-      .insert(chats)
-      .values({ userId, kind: "direct" })
-      .returning()
+      const [chat] = await tx
+        .insert(chats)
+        .values({ userId, kind: "direct" })
+        .returning()
 
-    await tx.insert(chatMembers).values({ chatId: chat.id, botId: bot.id })
+      await tx.insert(chatMembers).values({ chatId: chat.id, botId: bot.id })
 
-    return { bot, chat }
-  })
+      return { bot, chat }
+    })
+  } catch (error) {
+    // Don't leave a sandbox behind for a bot that was never saved
+    await deleteBotSandbox(sandboxId).catch((cleanupError) =>
+      console.error("Failed to delete orphaned sandbox", cleanupError)
+    )
+    throw error
+  }
+  const { bot, chat } = created
 
   revalidatePath("/")
 
@@ -54,8 +76,7 @@ export async function createBot(input: InsertBot): Promise<CreateBotResult> {
 }
 
 type UpdateBotResult =
-  | { success: true; bot: Bot }
-  | { success: false; error: string }
+  { success: true; bot: Bot } | { success: false; error: string }
 
 export async function updateBot(
   botId: string,
@@ -94,6 +115,26 @@ export async function deleteBot(botId: string): Promise<DeleteBotResult> {
   const { isAuthenticated, userId } = await auth()
   if (!isAuthenticated) {
     return { success: false, error: "Sign in to delete a bot." }
+  }
+
+  const [existing] = await db
+    .select({ sandboxId: bots.sandboxId })
+    .from(bots)
+    .where(and(eq(bots.id, botId), eq(bots.userId, userId)))
+
+  if (!existing) {
+    return { success: false, error: "That bot doesn't exist." }
+  }
+
+  // Sandbox first: if this fails the bot stays, so the user can retry
+  // instead of leaving an orphaned sandbox behind
+  if (existing.sandboxId) {
+    try {
+      await deleteBotSandbox(existing.sandboxId)
+    } catch (error) {
+      console.error("Failed to delete sandbox", error)
+      return { success: false, error: "Couldn't delete your bot. Try again." }
+    }
   }
 
   const deleted = await db.transaction(async (tx) => {
