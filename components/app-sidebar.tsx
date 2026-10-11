@@ -1,26 +1,62 @@
+import Link from "next/link"
 import { UserButton } from "@clerk/nextjs"
+import { formatDistanceToNowStrict } from "date-fns"
 
+import { ChatAvatar } from "@/components/chat-avatar"
 import { NewChatMenu } from "@/components/new-chat-menu"
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
+import { getChats } from "@/queries/bots"
 
-export function AppSidebar() {
+export async function AppSidebar() {
+  const chats = await getChats()
+
   return (
     <Sidebar>
       <SidebarHeader className="flex-row justify-end">
         <NewChatMenu />
       </SidebarHeader>
       <SidebarContent>
-        <SidebarGroup />
-        <SidebarGroup />
+        <SidebarGroup>
+          <SidebarGroupLabel>Chats</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {chats.map((chat) => (
+                <SidebarMenuItem key={chat.id}>
+                  <SidebarMenuButton
+                    size="lg"
+                    render={<Link href={`/chats/${chat.id}`} />}
+                  >
+                    <ChatAvatar seed={chat.bot.avatar} />
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <div className="flex items-baseline gap-2">
+                        <span className="truncate font-medium">
+                          {chat.name ?? chat.bot.name}
+                        </span>
+                        <span className="ms-auto shrink-0 text-xs text-muted-foreground">
+                          {formatDistanceToNowStrict(chat.lastMessageAt)}
+                        </span>
+                      </div>
+                      <span className="truncate text-xs text-muted-foreground">
+                        {chat.lastMessagePreview}
+                      </span>
+                    </div>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>
@@ -31,7 +67,7 @@ export function AppSidebar() {
                 the whole menu button. */}
             <SidebarMenuButton
               render={<div />}
-              className="p-0 *:data-clerk-component:size-full has-focus-visible:ring-2 has-aria-expanded:bg-sidebar-accent has-aria-expanded:text-sidebar-accent-foreground"
+              className="p-0 has-focus-visible:ring-2 has-aria-expanded:bg-sidebar-accent has-aria-expanded:text-sidebar-accent-foreground *:data-clerk-component:size-full"
             >
               <UserButton
                 showName
