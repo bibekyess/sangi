@@ -1,5 +1,6 @@
 import { UserButton } from "@clerk/nextjs"
 
+import { NewChatMenu } from "@/components/new-chat-menu"
 import {
   Sidebar,
   SidebarContent,
@@ -14,7 +15,9 @@ import {
 export function AppSidebar() {
   return (
     <Sidebar>
-      <SidebarHeader />
+      <SidebarHeader className="flex-row justify-end">
+        <NewChatMenu />
+      </SidebarHeader>
       <SidebarContent>
         <SidebarGroup />
         <SidebarGroup />

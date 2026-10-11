@@ -70,8 +70,22 @@ function emptyBot(): InsertBot {
   return { name: "", avatar: nanoid(), job: "", instructions: "" }
 }
 
-function BotDialog({ children }: { children: React.ReactElement }) {
-  const [open, setOpen] = React.useState(false)
+function BotDialog({
+  children,
+  open: openProp,
+  onOpenChange,
+}: {
+  children?: React.ReactElement
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+}) {
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
+  const open = openProp ?? uncontrolledOpen
+
+  function setOpen(next: boolean) {
+    setUncontrolledOpen(next)
+    onOpenChange?.(next)
+  }
 
   const form = useForm<InsertBot>({
     resolver: zodResolver(insertBotSchema),
@@ -106,7 +120,7 @@ function BotDialog({ children }: { children: React.ReactElement }) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={children} />
+      {children && <DialogTrigger render={children} />}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>New bot</DialogTitle>
