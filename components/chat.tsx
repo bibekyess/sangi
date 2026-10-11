@@ -1,6 +1,8 @@
 "use client"
 
+import * as React from "react"
 import { useChat } from "@ai-sdk/react"
+import type { ChatSessionPersistedState } from "@trigger.dev/sdk/chat"
 import {
   useLoadTranscript,
   usePendingMessages,
@@ -44,13 +46,51 @@ import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
 
 type ChatTransport = ReturnType<typeof useTriggerChatTransport>
 
+function sessionKey(chatId: string) {
+  return `chat-session:${chatId}`
+}
+
+// Kept so a reload mid-reply can reconnect to the running turn. Storage can be
+// unavailable (private mode, blocked site data), which only loses the resume
+function saveSession(
+  chatId: string,
+  session: ChatSessionPersistedState | null
+) {
+  try {
+    if (session) {
+      localStorage.setItem(sessionKey(chatId), JSON.stringify(session))
+    } else {
+      localStorage.removeItem(sessionKey(chatId))
+    }
+  } catch {}
+}
+
+function readSession(chatId: string): ChatSessionPersistedState | undefined {
+  try {
+    const saved = localStorage.getItem(sessionKey(chatId))
+    return saved ? JSON.parse(saved) : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function Chat({ chatId }: { chatId: string }) {
   const transport = useTriggerChatTransport<typeof chatAgent>({
     task: "chat",
     accessToken: ({ chatId }) => mintChatAccessToken(chatId),
     startSession: ({ chatId, clientData }) =>
       startChatSession({ chatId, clientData }),
+    onSessionChange: saveSession,
   })
+  // Restored before the transcript loads. Its saved cursor is dropped so the
+  // transcript's takes over: a reply still running started after the history
+  // the transcript holds, and resuming from later would cut off its start
+  React.useEffect(() => {
+    const saved = readSession(chatId)
+    if (saved && !transport.getSession(chatId)) {
+      transport.setSession(chatId, { ...saved, lastEventId: undefined })
+    }
+  }, [chatId, transport])
   const { messages, isLoading } = useLoadTranscript<ChatUIMessage>(
     chatId,
     loadChatTranscript,
@@ -89,6 +129,8 @@ function ChatView({
       id: chatId,
       messages: initialMessages,
       transport,
+      // Picks up a reply that was still streaming when the page loaded
+      resume: true,
     })
   // A message sent mid-reply goes to the running turn, which folds it in at
   // its next step. Sending it through useChat would open a second stream of
