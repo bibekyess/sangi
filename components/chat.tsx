@@ -1,6 +1,6 @@
 "use client"
 
-import { useChat, type UIMessage } from "@ai-sdk/react"
+import { useChat } from "@ai-sdk/react"
 import {
   useLoadTranscript,
   useTriggerChatTransport,
@@ -30,8 +30,14 @@ import {
   PromptInputTextarea,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input"
+import { Shimmer } from "@/components/ai-elements/shimmer"
+import {
+  isToolCallPart,
+  ToolSteps,
+  type ToolCallPart,
+} from "@/components/tool-call"
 import { Spinner } from "@/components/ui/spinner"
-import type { chatAgent } from "@/trigger/chat"
+import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
 
 type ChatTransport = ReturnType<typeof useTriggerChatTransport>
 
@@ -42,7 +48,7 @@ export function Chat({ chatId }: { chatId: string }) {
     startSession: ({ chatId, clientData }) =>
       startChatSession({ chatId, clientData }),
   })
-  const { messages, isLoading } = useLoadTranscript(
+  const { messages, isLoading } = useLoadTranscript<ChatUIMessage>(
     chatId,
     loadChatTranscript,
     { transport }
@@ -72,10 +78,10 @@ function ChatView({
   transport,
 }: {
   chatId: string
-  initialMessages: UIMessage[]
+  initialMessages: ChatUIMessage[]
   transport: ChatTransport
 }) {
-  const { messages, sendMessage, status, stop } = useChat({
+  const { messages, sendMessage, status, stop } = useChat<ChatUIMessage>({
     id: chatId,
     messages: initialMessages,
     transport,
@@ -87,6 +93,14 @@ function ChatView({
     }
     sendMessage({ text })
   }
+
+  const lastMessage = messages.at(-1)
+  // Between sending and the first streamed part there's nothing to show yet
+  const isWaiting =
+    status === "submitted" ||
+    (status === "streaming" &&
+      lastMessage?.role === "assistant" &&
+      !lastMessage.parts.some((part) => part.type !== "step-start"))
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -101,16 +115,23 @@ function ChatView({
             messages.map((message) => (
               <Message from={message.role} key={message.id}>
                 <MessageContent>
-                  {message.parts.map((part, i) =>
-                    part.type === "text" ? (
-                      <MessageResponse key={`${message.id}-${i}`}>
-                        {part.text}
+                  {groupParts(message.parts).map((group) =>
+                    group.kind === "tools" ? (
+                      <ToolSteps key={group.key} parts={group.parts} />
+                    ) : (
+                      <MessageResponse key={group.key}>
+                        {group.text}
                       </MessageResponse>
-                    ) : null
+                    )
                   )}
                 </MessageContent>
               </Message>
             ))
+          )}
+          {isWaiting && (
+            <Shimmer className="text-sm" duration={1.5}>
+              Thinking…
+            </Shimmer>
           )}
         </ConversationContent>
         <ConversationScrollButton />
@@ -127,4 +148,28 @@ function ChatView({
       </div>
     </div>
   )
+}
+
+type PartGroup =
+  | { kind: "text"; key: string; text: string }
+  | { kind: "tools"; key: string; parts: ToolCallPart[] }
+
+// Consecutive tool calls render as one timeline between the text around them
+function groupParts(parts: ChatUIMessage["parts"]) {
+  const groups: PartGroup[] = []
+  parts.forEach((part, i) => {
+    if (part.type === "text") {
+      if (part.text.trim()) {
+        groups.push({ kind: "text", key: `text-${i}`, text: part.text })
+      }
+    } else if (isToolCallPart(part)) {
+      const last = groups.at(-1)
+      if (last?.kind === "tools") {
+        last.parts.push(part)
+      } else {
+        groups.push({ kind: "tools", key: part.toolCallId, parts: [part] })
+      }
+    }
+  })
+  return groups
 }

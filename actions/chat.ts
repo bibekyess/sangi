@@ -8,8 +8,10 @@ import {
   type ChatStartSessionParams,
 } from "@trigger.dev/sdk/ai"
 
+import type { LoadTranscriptResult } from "@trigger.dev/sdk/chat/react"
+
 import { getChat } from "@/queries/chats"
-import type { chatAgent } from "@/trigger/chat"
+import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
 
 const startSession = chat.createStartSessionAction<typeof chatAgent>("chat")
 const loadTranscript = chat.createLoadTranscriptAction(defaultStorage)
@@ -41,7 +43,11 @@ export async function mintChatAccessToken(chatId: string) {
 }
 
 // The chat's saved messages, read from the agent's transcript storage
-export async function loadChatTranscript(params: ChatLoadTranscriptParams) {
+export async function loadChatTranscript(
+  params: ChatLoadTranscriptParams
+): Promise<LoadTranscriptResult<ChatUIMessage>> {
   await assertChatOwner(params.chatId)
-  return loadTranscript(params)
+  const result = await loadTranscript(params)
+  // Written by chatAgent, so its parts match the agent's tool set
+  return { ...result, messages: result.messages as ChatUIMessage[] }
 }

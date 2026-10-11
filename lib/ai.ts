@@ -45,6 +45,8 @@ function createFreeLLM() {
     apiKey: process.env.FREELLM_API_KEY?.trim() || undefined,
     headers: parseHeaders(process.env.FREELLM_HEADERS),
     includeUsage: true,
+    // Send screenshots from tools as image parts instead of stringified JSON
+    supportsMultiPartToolContent: true,
   })
 }
 

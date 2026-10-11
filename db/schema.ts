@@ -3,6 +3,7 @@
 import { relations } from "drizzle-orm"
 import {
   index,
+  integer,
   pgEnum,
   pgTable,
   primaryKey,
@@ -120,3 +121,28 @@ export type Chat = typeof chats.$inferSelect
 export type NewChat = typeof chats.$inferInsert
 export type ChatMember = typeof chatMembers.$inferSelect
 export type NewChatMember = typeof chatMembers.$inferInsert
+
+// Screenshots of a bot's sandbox desktop. Too large for the chat stream, so
+// tool results carry only the ID and the image is fetched separately
+export const screenshots = pgTable(
+  "screenshots",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => nanoid()),
+    chatId: text("chat_id")
+      .notNull()
+      .references(() => chats.id, { onDelete: "cascade" }),
+    mediaType: text("media_type").notNull(),
+    // Base64-encoded image bytes
+    data: text("data").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("screenshots_chat_id_idx").on(table.chatId)]
+)
+
+export type Screenshot = typeof screenshots.$inferSelect
