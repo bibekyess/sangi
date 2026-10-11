@@ -18,7 +18,7 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar"
-import { getChats } from "@/queries/bots"
+import { getChats } from "@/queries/chats"
 
 export async function AppSidebar() {
   const chats = await getChats()

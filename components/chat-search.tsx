@@ -16,7 +16,7 @@ import {
   CommandList,
 } from "@/components/ui/command"
 import { Kbd } from "@/components/ui/kbd"
-import type { ChatWithBot } from "@/queries/bots"
+import type { ChatWithBot } from "@/queries/chats"
 
 function subscribe() {
   return () => {}

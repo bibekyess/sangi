@@ -30,3 +30,31 @@ export async function getChats() {
 }
 
 export type ChatWithBot = Awaited<ReturnType<typeof getChats>>[number]
+
+// One of the signed-in user's chats with its first bot, or null if it doesn't
+// exist or belongs to someone else
+export async function getChat(chatId: string) {
+  const { isAuthenticated, userId } = await auth()
+  if (!isAuthenticated) {
+    return null
+  }
+
+  const row = await db.query.chats.findFirst({
+    where: (chat, { and, eq }) =>
+      and(eq(chat.id, chatId), eq(chat.userId, userId)),
+    with: {
+      members: {
+        orderBy: (member, { asc }) => [asc(member.joinedAt)],
+        limit: 1,
+        with: { bot: true },
+      },
+    },
+  })
+
+  if (!row || row.members.length === 0) {
+    return null
+  }
+
+  const { members, ...chat } = row
+  return { ...chat, bot: members[0].bot }
+}
