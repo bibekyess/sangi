@@ -3,6 +3,7 @@ import { UserButton } from "@clerk/nextjs"
 import { formatDistanceToNowStrict } from "date-fns"
 
 import { ChatAvatar } from "@/components/chat-avatar"
+import { ChatSearch } from "@/components/chat-search"
 import { NewChatMenu } from "@/components/new-chat-menu"
 import {
   Sidebar,
@@ -23,8 +24,11 @@ export async function AppSidebar() {
 
   return (
     <Sidebar>
-      <SidebarHeader className="flex-row justify-end">
-        <NewChatMenu />
+      <SidebarHeader>
+        <div className="flex justify-end">
+          <NewChatMenu />
+        </div>
+        <ChatSearch chats={chats} />
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
