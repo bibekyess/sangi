@@ -19,9 +19,11 @@ function getDaytona() {
   return client
 }
 
-// One sandbox per bot, labelled so it can be traced back from the dashboard
+// One sandbox per bot, labelled so it can be traced back from the dashboard.
+// Without DAYTONA_SNAPSHOT the server picks its default snapshot
 export async function createBotSandbox(botId: string, userId: string) {
   const sandbox = await getDaytona().create({
+    snapshot: process.env.DAYTONA_SNAPSHOT || undefined,
     labels: { app: "sangi", botId, userId },
   })
   return sandbox.id
