@@ -4,7 +4,6 @@ import { auth } from "@clerk/nextjs/server"
 import { auth as triggerAuth } from "@trigger.dev/sdk"
 import {
   chat,
-  defaultStorage,
   type ChatLoadTranscriptParams,
   type ChatStartSessionParams,
 } from "@trigger.dev/sdk/ai"
@@ -22,11 +21,12 @@ import {
   type Chat,
   type InsertGroupChat,
 } from "@/db/schema"
+import { transcriptStorage } from "@/lib/transcript-storage"
 import { getChat } from "@/queries/chats"
 import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
 
 const startSession = chat.createStartSessionAction<typeof chatAgent>("chat")
-const loadTranscript = chat.createLoadTranscriptAction(defaultStorage)
+const loadTranscript = chat.createLoadTranscriptAction(transcriptStorage)
 
 // chatId comes from the browser, so check the signed-in user owns the chat
 // before handing out access to its session or transcript
@@ -54,7 +54,7 @@ export async function mintChatAccessToken(chatId: string) {
   })
 }
 
-// The chat's saved messages, read from the agent's transcript storage
+// The chat's saved messages, read from Neon like the agent reads them
 export async function loadChatTranscript(
   params: ChatLoadTranscriptParams
 ): Promise<LoadTranscriptResult<ChatUIMessage>> {

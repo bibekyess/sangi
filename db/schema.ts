@@ -1,9 +1,12 @@
 // Define tables here, then run `npm run db:push`.
 // https://orm.drizzle.team/docs/sql-schema-declaration
 import { relations, sql } from "drizzle-orm"
+import type { UIMessage } from "ai"
 import {
+  boolean,
   index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   primaryKey,
@@ -94,12 +97,59 @@ export const chats = pgTable(
     lastMessageAt: timestamp("last_message_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // The chat agent's opaque record of what the model saw beyond the
+    // messages, such as a compaction summary. Only the runtime reads it
+    transcriptState: jsonb("transcript_state"),
+    // Where each Trigger.dev environment's session stream resumes. Kept apart
+    // because one environment's event IDs mean nothing in another, while the
+    // messages are shared by all of them
+    transcriptCursors: jsonb("transcript_cursors")
+      .$type<TranscriptCursorsByEnvironment>()
+      .notNull()
+      .default({}),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
   (table) => [index("chats_user_id_idx").on(table.userId)]
 )
+
+export type TriggerEnvironment =
+  "DEVELOPMENT" | "PREVIEW" | "STAGING" | "PRODUCTION"
+
+export type TranscriptCursorsByEnvironment = Partial<
+  Record<
+    TriggerEnvironment,
+    { lastOutEventId?: string; lastInEventId?: string }
+  >
+>
+
+// A chat's messages as the chat agent saves them, in AI SDK UIMessage form
+export const chatMessages = pgTable(
+  "chat_messages",
+  {
+    chatId: text("chat_id")
+      .notNull()
+      .references(() => chats.id, { onDelete: "cascade" }),
+    // The UIMessage's own ID, unique within its chat
+    id: text("id").notNull(),
+    // Set when the message is first saved and kept when it's replaced, so an
+    // edited message keeps its place. Gaps are fine
+    position: integer("position").notNull(),
+    message: jsonb("message").$type<UIMessage>().notNull(),
+    // False for a partial answer from a turn that failed or was stopped
+    final: boolean("final").notNull().default(true),
+  },
+  (table) => [
+    primaryKey({ columns: [table.chatId, table.id] }),
+    index("chat_messages_chat_id_position_idx").on(
+      table.chatId,
+      table.position
+    ),
+  ]
+)
+
+export type ChatMessage = typeof chatMessages.$inferSelect
 
 export const chatMembers = pgTable(
   "chat_members",
@@ -126,6 +176,11 @@ export const botsRelations = relations(bots, ({ many }) => ({
 
 export const chatsRelations = relations(chats, ({ many }) => ({
   members: many(chatMembers),
+  messages: many(chatMessages),
+}))
+
+export const chatMessagesRelations = relations(chatMessages, ({ one }) => ({
+  chat: one(chats, { fields: [chatMessages.chatId], references: [chats.id] }),
 }))
 
 export const chatMembersRelations = relations(chatMembers, ({ one }) => ({

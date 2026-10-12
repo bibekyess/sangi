@@ -27,6 +27,7 @@ import {
   pruneScreenshots,
   type SandboxTools,
 } from "@/lib/sandbox-tools"
+import { transcriptStorage } from "@/lib/transcript-storage"
 
 // Context size at which the history is summarised. Well under the model's
 // window, since answers degrade long before it fills
@@ -138,10 +139,12 @@ function createChatTools({
   return { ...sandboxTools, handoff }
 }
 
-// One long-lived run per chat. History is kept by the platform's default
-// transcript storage, keyed by chatId, and read back by loadChatTranscript
+// One long-lived run per chat. History is kept in Neon by transcriptStorage,
+// keyed by chatId, so every Trigger.dev environment sees the same chats, and
+// read back by loadChatTranscript
 export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   id: "chat",
+  storage: transcriptStorage,
   // Sent with every message, so each turn can go to a different bot
   clientDataSchema: z.object({ botId: z.string().optional() }),
   uiMessageStreamOptions: {
@@ -180,8 +183,8 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
     z.object({ type: z.literal("clear") }),
     z.object({ type: z.literal("compact") }),
   ]),
-  // The default storage rewrites the whole transcript, so a reload shows
-  // what these leave too
+  // The storage is handed what these change, so a reload shows what they
+  // leave too
   onAction: async ({ action, messages }) => {
     // Starts the model afresh once a long chat crowds its context
     if (action.type === "clear") {
