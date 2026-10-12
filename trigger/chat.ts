@@ -36,9 +36,13 @@ const COMPACT_AT_TOKENS = 80_000
 const SUMMARY_REQUEST = `Summarise the conversation so far for yourself, to carry on from it with the earlier messages gone. Keep what the user wants and any instructions they gave, what has been done and found, decisions made, and where things stand now: open pages, files, logins and anything left to do. Write it as notes, not a reply to the user.`
 
 // Thinking is switched off: a summary needs none and it would only be cut
-async function summarizeHistory(messages: ModelMessage[]) {
+async function summarizeHistory(
+  messages: ModelMessage[],
+  abortSignal?: AbortSignal
+) {
   const result = await generateText({
     model: getChatModel(),
+    abortSignal,
     messages: [
       ...pruneScreenshots(messages),
       { role: "user", content: SUMMARY_REQUEST },
@@ -170,9 +174,9 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   },
   // Once the context grows past the threshold, the model gets a summary in
   // place of the earlier turns. The chat still shows them all.
-  // Only between turns: mid-turn compaction rebuilds from each step's
-  // response.messages, which AI SDK 7 trims to the step's own (see run), and
-  // the rebuild in run would undo it anyway
+  // Only between turns here: the managed mid-turn compaction rebuilds from
+  // each step's response.messages, which AI SDK 7 trims to the step's own, so
+  // run's prepareStep compacts mid-turn itself
   compaction: {
     shouldCompact: ({ source, totalTokens }) =>
       source === "outer" && (totalTokens ?? 0) > COMPACT_AT_TOKENS,
@@ -266,11 +270,17 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
       // hold all earlier steps too, as in AI SDK 5/6. AI SDK 7 gives each step
       // only its own, so from the third step on the model would never see
       // another tool result, and would repeat the same call forever
-      prepareStep: ({ messages: current, steps }) => {
+      prepareStep: async ({ messages: current, steps }) => {
         // Steps only add assistant and tool messages, so a user message not
-        // seen before was injected at this boundary
+        // seen before was injected at this boundary. After a compaction the
+        // managed prepareStep leads with a fresh copy of the summary, which
+        // isn't one
+        const summary = chat.getCompactionState()?.summary
         const injected = current.filter(
-          (message) => message.role === "user" && !known.has(message)
+          (message) =>
+            message.role === "user" &&
+            !known.has(message) &&
+            message.content !== summary
         )
         if (injected.length > 0) {
           injected.forEach((message) => known.add(message))
@@ -279,17 +289,49 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
         const handoffs = steps
           .flatMap((step) => step.toolCalls)
           .filter((call) => call.toolName === "handoff").length
+        const stepMessages = (from: number) =>
+          steps
+            .slice(from)
+            .flatMap((step, i) => [
+              ...step.response.messages,
+              ...(steered.get(from + i) ?? []),
+            ])
+
+        // A long turn of tool calls can outgrow the model's context before
+        // the turn ends and the history is compacted, so it is summarised
+        // here too, once per turn: chat.compact keeps the first summary, and
+        // hands it and the steps after it on to the next turn. It streams the
+        // progress too. A failed summary leaves the history as it was
+        const history = pruneScreenshots([
+          ...messages,
+          // Arrived before the first step
+          ...(steered.get(-1) ?? []),
+          ...stepMessages(0),
+        ])
+        if (summary === undefined) {
+          try {
+            await chat.compact(history, steps, {
+              threshold: COMPACT_AT_TOKENS,
+              summarize: (toSummarize) => summarizeHistory(toSummarize, signal),
+            })
+          } catch (error) {
+            console.error("Chat compaction failed", error)
+          }
+        }
+
+        // The summary stands in for every step it covers
+        const compaction = chat.getCompactionState()
         return {
           activeTools: activeTools(handoffs),
-          messages: pruneScreenshots([
-            ...messages,
-            // Arrived before the first step
-            ...(steered.get(-1) ?? []),
-            ...steps.flatMap((step, i) => [
-              ...step.response.messages,
-              ...(steered.get(i) ?? []),
-            ]),
-          ]),
+          messages: compaction
+            ? pruneScreenshots([
+                {
+                  role: "user",
+                  content: `[Conversation summary]\n\n${compaction.summary}\n\nCarry on from here.`,
+                },
+                ...stepMessages(compaction.baseResponseStepCount),
+              ])
+            : history,
         }
       },
       ...thinkingOptions,
