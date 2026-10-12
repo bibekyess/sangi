@@ -1,3 +1,4 @@
+import { additionalPackages } from "@trigger.dev/build/extensions/core";
 import { defineConfig } from "@trigger.dev/sdk";
 
 export default defineConfig({
@@ -22,5 +23,10 @@ export default defineConfig({
   build: {
     // Resolves "server-only" to its empty module, so tasks can import lib/ai
     conditions: ["react-server"],
+    // @daytona/sdk loads these with a runtime require the bundler can't see,
+    // form-data to upload files and busboy to download them, so install them
+    // in the image. Marking the SDK external doesn't work: its cjs/package.json
+    // has no name, so Trigger.dev bundles it anyway
+    extensions: [additionalPackages({ packages: ["form-data", "busboy"] })],
   },
 });
