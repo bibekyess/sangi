@@ -1,7 +1,7 @@
 "use server"
 
 import { auth } from "@clerk/nextjs/server"
-import { and, eq, inArray } from "drizzle-orm"
+import { and, eq, inArray, sql } from "drizzle-orm"
 import { nanoid } from "nanoid"
 import { revalidatePath } from "next/cache"
 
@@ -23,8 +23,25 @@ import {
   startDesktop,
 } from "@/lib/daytona"
 
-type CreateBotResult =
-  { success: true; bot: Bot; chat: Chat } | { success: false; error: string }
+// A failure that belongs to one field, so the form can show it there
+type FieldError = { success: false; error: string; field?: "name" }
+
+const nameTaken = {
+  success: false,
+  error: "You already have a bot with this name.",
+  field: "name",
+} satisfies FieldError
+
+// Postgres reports a duplicate in a unique index as 23505. Drizzle wraps the
+// driver's error, so look at its cause too
+function isUniqueViolation(error: unknown) {
+  const cause = error instanceof Error ? error.cause : undefined
+  return [error, cause].some(
+    (e) => (e as { code?: string } | undefined)?.code === "23505"
+  )
+}
+
+type CreateBotResult = { success: true; bot: Bot; chat: Chat } | FieldError
 
 export async function createBot(input: InsertBot): Promise<CreateBotResult> {
   const { isAuthenticated, userId } = await auth()
@@ -36,6 +53,21 @@ export async function createBot(input: InsertBot): Promise<CreateBotResult> {
   const parsed = insertBotSchema.safeParse(input)
   if (!parsed.success) {
     return { success: false, error: parsed.error.issues[0].message }
+  }
+
+  // Checked before the sandbox, which is slow to make. The unique index still
+  // catches a name taken in the meantime
+  const [sameName] = await db
+    .select({ id: bots.id })
+    .from(bots)
+    .where(
+      and(
+        eq(bots.userId, userId),
+        eq(sql`lower(${bots.name})`, parsed.data.name.toLowerCase())
+      )
+    )
+  if (sameName) {
+    return nameTaken
   }
 
   // Pick the ID up front so the sandbox can be labelled with it
@@ -72,6 +104,9 @@ export async function createBot(input: InsertBot): Promise<CreateBotResult> {
     await deleteBotSandbox(sandboxId).catch((cleanupError) =>
       console.error("Failed to delete orphaned sandbox", cleanupError)
     )
+    if (isUniqueViolation(error)) {
+      return nameTaken
+    }
     throw error
   }
   const { bot, chat } = created
@@ -81,8 +116,7 @@ export async function createBot(input: InsertBot): Promise<CreateBotResult> {
   return { success: true, bot, chat }
 }
 
-type UpdateBotResult =
-  { success: true; bot: Bot } | { success: false; error: string }
+type UpdateBotResult = { success: true; bot: Bot } | FieldError
 
 export async function updateBot(
   botId: string,
@@ -99,11 +133,21 @@ export async function updateBot(
   }
 
   // Scope the write to the session's user so one user can't edit another's bot
-  const [bot] = await db
+  const updated = await db
     .update(bots)
     .set(parsed.data)
     .where(and(eq(bots.id, botId), eq(bots.userId, userId)))
     .returning()
+    .catch((error) => {
+      if (isUniqueViolation(error)) {
+        return null
+      }
+      throw error
+    })
+  if (!updated) {
+    return nameTaken
+  }
+  const [bot] = updated
 
   if (!bot) {
     return { success: false, error: "That bot doesn't exist." }

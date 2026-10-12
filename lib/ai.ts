@@ -57,3 +57,34 @@ export function getChatModel(modelId = requireEnv("FREELLM_MODEL")) {
   freellm ??= createFreeLLM()
   return freellm.chatModel(modelId)
 }
+
+// Qwen3 thinks before every reply and tool call, and acts better for it. The
+// server returns the thinking as `reasoning`, which the provider streams as
+// reasoning parts and sends back as `reasoning_content` on the next step, so
+// each step's thinking follows the tool results it saw.
+// Sampling follows Qwen's recommendation for thinking mode
+export const thinkingOptions = {
+  temperature: 0.6,
+  topP: 0.95,
+  providerOptions: {
+    freellm: {
+      // Not in the AI SDK's call options, so passed straight to the server
+      top_k: 20,
+      min_p: 0,
+      chat_template_kwargs: { enable_thinking: true },
+      // One action per step, so the next one is decided after seeing the
+      // result of this one rather than blind
+      parallel_tool_calls: false,
+    },
+  },
+}
+
+// Computer use takes many small steps: think, act, look again
+export const MAX_AGENT_STEPS = 60
+
+// A stream error as the chat shows it: named rather than hidden behind the
+// AI SDK's "An error occurred.", but without the stack
+export function streamErrorText(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.slice(0, 500) || "Something went wrong."
+}

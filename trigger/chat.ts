@@ -2,43 +2,31 @@ import { chat } from "@trigger.dev/sdk/ai"
 import {
   generateId,
   generateText,
+  hasToolCall,
   stepCountIs,
   type InferUITools,
   type ModelMessage,
+  type ToolSet,
   type UIMessage,
 } from "ai"
 import { z } from "zod"
 
 import { db } from "@/db"
-import { getChatModel } from "@/lib/ai"
-import { buildBotPrompt } from "@/lib/bot-prompt"
+import {
+  getChatModel,
+  MAX_AGENT_STEPS,
+  streamErrorText,
+  thinkingOptions,
+} from "@/lib/ai"
+import { buildAutoPrompt, buildBotPrompt } from "@/lib/bot-prompt"
 import { summaryMessage } from "@/lib/compaction"
+import { AUTO_BOT_ID, AUTO_BOT_NAME } from "@/lib/group-chat"
+import { createHandoffTool, type HandoffTools } from "@/lib/handoff"
 import {
   createSandboxTools,
   pruneScreenshots,
   type SandboxTools,
 } from "@/lib/sandbox-tools"
-
-// Qwen3 thinks before every reply and tool call, and acts better for it. The
-// server returns the thinking as `reasoning`, which the provider streams as
-// reasoning parts and sends back as `reasoning_content` on the next step, so
-// each step's thinking follows the tool results it saw.
-// Sampling follows Qwen's recommendation for thinking mode
-const thinkingOptions = {
-  temperature: 0.6,
-  topP: 0.95,
-  providerOptions: {
-    freellm: {
-      // Not in the AI SDK's call options, so passed straight to the server
-      top_k: 20,
-      min_p: 0,
-      chat_template_kwargs: { enable_thinking: true },
-      // One action per step, so the next one is decided after seeing the
-      // result of this one rather than blind
-      parallel_tool_calls: false,
-    },
-  },
-}
 
 // Context size at which the history is summarised. Well under the model's
 // window, since answers degrade long before it fills
@@ -70,19 +58,23 @@ export type CompactionData = {
   summary?: { id: string; text: string }
 }
 
-// Which bot wrote a reply, so group chats can show who answered
+// Which bot wrote a reply, so group chats can show who answered: a bot's ID,
+// or AUTO_BOT_ID. Bots a reply handed off to are named in its handoff parts
 export type ChatMessageMetadata = { botId?: string }
 
 export type ChatUIMessage = UIMessage<
   ChatMessageMetadata,
   { compaction: CompactionData },
-  InferUITools<SandboxTools>
+  InferUITools<SandboxTools & HandoffTools>
 >
 
-// The bot that answers this turn, and in a group chat the others with it. The
-// bot is the one picked in a group chat, or else the chat's first, which is a
-// direct chat's only bot. The pick comes from the browser, so it has to be
-// one of the chat's own bots
+// How many bots Auto can hand one message to before it has to wrap up
+const MAX_AUTO_HANDOFFS = 5
+
+// Who answers this turn: the bot picked in a group chat, or else the chat's
+// first, which is a direct chat's only bot. Auto, which only group chats have,
+// leaves `bot` unset. The pick comes from the browser, so it has to be Auto
+// or one of the chat's own bots
 async function getChatBots(chatId: string, botId?: string) {
   const row = await db.query.chats.findFirst({
     where: (chat, { eq }) => eq(chat.id, chatId),
@@ -95,6 +87,10 @@ async function getChatBots(chatId: string, botId?: string) {
     },
   })
   const bots = row?.members.map((member) => member.bot) ?? []
+  const isGroup = row?.kind === "group"
+  if (isGroup && botId === AUTO_BOT_ID) {
+    return { bot: undefined, bots, isGroup }
+  }
   const bot = botId ? bots.find((bot) => bot.id === botId) : bots[0]
   if (!bot) {
     throw new Error(
@@ -103,9 +99,43 @@ async function getChatBots(chatId: string, botId?: string) {
         : `No bot found for chat ${chatId}`
     )
   }
-  const groupMates =
-    row?.kind === "group" ? bots.filter((mate) => mate.id !== bot.id) : []
-  return { bot, groupMates }
+  return { bot, bots, isGroup }
+}
+
+// The turn's tools. In a group chat the picked bot can hand off to the
+// others, and Auto to any of them. Auto can't use a sandbox, but keeps the
+// first bot's tools for converting earlier turns, and run turns them off
+function createChatTools({
+  chatId,
+  bot,
+  bots,
+  isGroup,
+}: Awaited<ReturnType<typeof getChatBots>> & { chatId: string }): ToolSet {
+  const sandboxTools = createSandboxTools({
+    chatId,
+    sandboxId: (bot ?? bots[0]).sandboxId,
+  })
+  if (!isGroup) {
+    return sandboxTools
+  }
+  const handoff = bot
+    ? createHandoffTool({
+        chatId,
+        from: bot.name,
+        members: bots,
+        targets: bots.filter((target) => target.id !== bot.id),
+        description:
+          "Hand the person's message to another bot whose job fits it better. That bot answers the person in your place, and your turn ends.",
+      })
+    : createHandoffTool({
+        chatId,
+        from: AUTO_BOT_NAME,
+        members: bots,
+        targets: bots,
+        description:
+          "Hand the person's message, or one part of it, to a bot. The bot works on it in its own sandbox and replies to the person, and you get its reply back.",
+      })
+  return { ...sandboxTools, handoff }
 }
 
 // One long-lived run per chat. History is kept by the platform's default
@@ -117,20 +147,19 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   uiMessageStreamOptions: {
     // Stream the model's thinking so the chat can show it, collapsed
     sendReasoning: true,
-    // Also names tool failures in the chat; the default hides every one
-    // behind "An error occurred." Logged in full, shown without the stack
+    // Also names tool failures in the chat. Logged in full
     onError: (error) => {
       console.error("Chat stream error", error)
-      const message = error instanceof Error ? error.message : String(error)
-      return message.slice(0, 500) || "Something went wrong."
+      return streamErrorText(error)
     },
   },
   // Declared here, not only on streamText, so viewScreen's toModelOutput is
   // re-applied when earlier turns are converted back for the model
-  tools: async ({ chatId, clientData }) => {
-    const { bot } = await getChatBots(chatId, clientData?.botId)
-    return createSandboxTools({ chatId, sandboxId: bot.sandboxId })
-  },
+  tools: async ({ chatId, clientData }) =>
+    createChatTools({
+      chatId,
+      ...(await getChatBots(chatId, clientData?.botId)),
+    }),
   // Messages sent while a reply streams join it at the next step boundary
   // rather than starting a turn of their own
   pendingMessages: {
@@ -182,17 +211,37 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   },
   // Set every turn rather than once per run, so edits to the bot apply to the
   // next message, continuation runs get the prompt too, and a group chat
-  // speaks as whichever bot was picked for this message
+  // speaks as whichever bot was picked for this message, or as Auto
   onTurnStart: async ({ chatId, clientData }) => {
-    const { bot, groupMates } = await getChatBots(chatId, clientData?.botId)
-    chat.prompt.set(buildBotPrompt(bot, groupMates))
+    const { bot, bots, isGroup } = await getChatBots(chatId, clientData?.botId)
+    chat.prompt.set(
+      bot
+        ? buildBotPrompt(
+            bot,
+            isGroup
+              ? { mates: bots.filter((mate) => mate.id !== bot.id) }
+              : undefined
+          )
+        : buildAutoPrompt(bots, MAX_AUTO_HANDOFFS)
+    )
     chat.setUIMessageStreamOptions({
-      messageMetadata: () => ({ botId: bot.id }) satisfies ChatMessageMetadata,
+      messageMetadata: () =>
+        ({ botId: bot?.id ?? AUTO_BOT_ID }) satisfies ChatMessageMetadata,
     })
   },
   // streamText comes from the run argument so the managed options apply,
   // including the system prompt set above
-  run: async ({ messages, tools, signal, streamText }) => {
+  run: async ({ messages, tools, clientData, signal, streamText }) => {
+    const isAuto = clientData?.botId === AUTO_BOT_ID
+    // Auto only hands off, and once it has used up its handoffs it can only
+    // wrap up. A bot keeps all of its tools
+    const activeTools = (handoffs: number) =>
+      isAuto
+        ? handoffs < MAX_AUTO_HANDOFFS
+          ? ["handoff" as const]
+          : []
+        : undefined
+
     // Steering messages, by the step they were injected after. The managed
     // prepareStep appends them to the messages it hands ours, which rebuilds
     // the history and would otherwise drop them
@@ -204,8 +253,11 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
       messages,
       tools,
       abortSignal: signal,
-      // Computer use takes many small steps: think, act, look again
-      stopWhen: stepCountIs(60),
+      activeTools: activeTools(0),
+      // A bot that hands off is done: the bot it handed to has answered
+      stopWhen: isAuto
+        ? stepCountIs(MAX_AGENT_STEPS)
+        : [stepCountIs(MAX_AGENT_STEPS), hasToolCall("handoff")],
       // Rebuilt from every step rather than taken from the argument: the SDK's
       // managed prepareStep (4.7.3) expects each step's response.messages to
       // hold all earlier steps too, as in AI SDK 5/6. AI SDK 7 gives each step
@@ -221,7 +273,11 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
           injected.forEach((message) => known.add(message))
           steered.set(steps.length - 1, injected)
         }
+        const handoffs = steps
+          .flatMap((step) => step.toolCalls)
+          .filter((call) => call.toolName === "handoff").length
         return {
+          activeTools: activeTools(handoffs),
           messages: pruneScreenshots([
             ...messages,
             // Arrived before the first step

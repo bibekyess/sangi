@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { useChat } from "@ai-sdk/react"
+import { SparklesIcon } from "lucide-react"
 import type { ChatSessionPersistedState } from "@trigger.dev/sdk/chat"
 import {
   useChatActions,
@@ -53,6 +54,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/components/ui/toast"
 import type { Bot } from "@/db/schema"
 import { summaryMessage } from "@/lib/compaction"
+import { AUTO_BOT_ID, AUTO_BOT_NAME } from "@/lib/group-chat"
 import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
 
 type ChatTransport = ReturnType<typeof useTriggerChatTransport>
@@ -88,11 +90,16 @@ function readSession(chatId: string): ChatSessionPersistedState | undefined {
 }
 
 // `bots` is passed for group chats, whose messages go to the bot picked in
-// the composer. Direct chats leave it out and always reach their one bot
+// the composer, or to Auto, which hands them on. Direct chats leave it out and
+// always reach their one bot
 export function Chat({ chatId, bots }: { chatId: string; bots?: ChatBot[] }) {
-  const [botId, setBotId] = React.useState(bots?.[0]?.id)
-  // A bot removed from the group falls back to the first one left
-  const bot = bots?.find((bot) => bot.id === botId) ?? bots?.[0]
+  const [pick, setPick] = React.useState(AUTO_BOT_ID)
+  // A bot removed from the group falls back to Auto
+  const botId = bots
+    ? bots.some((bot) => bot.id === pick)
+      ? pick
+      : AUTO_BOT_ID
+    : undefined
   // clientData goes out with every message, so each turn reaches the bot
   // picked when it was sent
   const transport = useTriggerChatTransport<typeof chatAgent>({
@@ -101,7 +108,7 @@ export function Chat({ chatId, bots }: { chatId: string; bots?: ChatBot[] }) {
     startSession: ({ chatId, clientData }) =>
       startChatSession({ chatId, clientData }),
     onSessionChange: saveSession,
-    clientData: { botId: bot?.id },
+    clientData: { botId },
   })
   // Restored before the transcript loads. Its saved cursor is dropped so the
   // transcript's takes over: a reply still running started after the history
@@ -133,8 +140,8 @@ export function Chat({ chatId, bots }: { chatId: string; bots?: ChatBot[] }) {
       initialMessages={messages}
       transport={transport}
       bots={bots}
-      bot={bot}
-      onBotChange={setBotId}
+      botId={botId}
+      onBotChange={setPick}
     />
   )
 }
@@ -144,14 +151,14 @@ function ChatView({
   initialMessages,
   transport,
   bots,
-  bot,
+  botId,
   onBotChange,
 }: {
   chatId: string
   initialMessages: ChatUIMessage[]
   transport: ChatTransport
   bots?: ChatBot[]
-  bot?: ChatBot
+  botId?: string
   onBotChange: (botId: string) => void
 }) {
   // Set while the agent summarises the history, after a long reply or for /compact
@@ -305,25 +312,22 @@ function ChatView({
                   <Message from="user" key={segment.key}>
                     <MessageContent>{segment.text}</MessageContent>
                   </Message>
+                ) : segment.kind === "handoff" ? (
+                  <HandoffReplyMessage
+                    key={segment.key}
+                    part={segment.part}
+                    bots={bots}
+                  />
                 ) : (
                   <Message from={message.role} key={segment.key}>
                     {message.role === "assistant" && (
                       <ReplyAuthor
-                        bot={bots?.find(
-                          (bot) => bot.id === message.metadata?.botId
-                        )}
+                        botId={message.metadata?.botId}
+                        bots={bots}
                       />
                     )}
                     <MessageContent>
-                      {segment.groups.map((group) =>
-                        group.kind === "tools" ? (
-                          <ToolSteps key={group.key} parts={group.parts} />
-                        ) : (
-                          <MessageResponse key={group.key}>
-                            {group.text}
-                          </MessageResponse>
-                        )
-                      )}
+                      <ReplyGroups groups={segment.groups} />
                     </MessageContent>
                   </Message>
                 )
@@ -359,12 +363,12 @@ function ChatView({
             <PromptInputTextarea placeholder="Send a message, /compact to summarize or /clear to start over..." />
           </PromptInputBody>
           <PromptInputFooter className={bots ? undefined : "justify-end"}>
-            {bots && bot && (
+            {bots && botId && (
               <PromptInputTools>
                 {/* A message sent mid-reply joins the running reply, so the
                     bot can only change between replies */}
                 <PromptInputSelect
-                  value={bot.id}
+                  value={botId}
                   onValueChange={(value) =>
                     typeof value === "string" && onBotChange(value)
                   }
@@ -372,15 +376,16 @@ function ChatView({
                 >
                   <PromptInputSelectTrigger aria-label="Bot to talk to">
                     <PromptInputSelectValue>
-                      <ChatAvatar seed={bot.avatar} className="size-4" />
-                      <span className="truncate">{bot.name}</span>
+                      <BotLabel botId={botId} bots={bots} />
                     </PromptInputSelectValue>
                   </PromptInputSelectTrigger>
                   <PromptInputSelectContent>
+                    <PromptInputSelectItem value={AUTO_BOT_ID}>
+                      <BotLabel botId={AUTO_BOT_ID} bots={bots} />
+                    </PromptInputSelectItem>
                     {bots.map((bot) => (
                       <PromptInputSelectItem key={bot.id} value={bot.id}>
-                        <ChatAvatar seed={bot.avatar} className="size-4" />
-                        {bot.name}
+                        <BotLabel botId={bot.id} bots={bots} />
                       </PromptInputSelectItem>
                     ))}
                   </PromptInputSelectContent>
@@ -400,17 +405,97 @@ function ChatView({
   )
 }
 
-// Which bot wrote a reply in a group chat. Direct chats pass no bots, and
-// summaries left by /compact have no author, so neither shows one
-function ReplyAuthor({ bot }: { bot?: ChatBot }) {
+// A bot, or Auto, with its face, as the composer's picker shows it
+function BotLabel({ botId, bots }: { botId: string; bots: ChatBot[] }) {
+  if (botId === AUTO_BOT_ID) {
+    return (
+      <>
+        <SparklesIcon className="size-4" />
+        <span className="truncate">{AUTO_BOT_NAME}</span>
+      </>
+    )
+  }
+  const bot = bots.find((bot) => bot.id === botId)
   if (!bot) {
     return null
   }
   return (
-    <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+    <>
       <ChatAvatar seed={bot.avatar} className="size-4" />
-      {bot.name}
+      <span className="truncate">{bot.name}</span>
+    </>
+  )
+}
+
+// Who wrote a reply in a group chat: a bot, or Auto. Direct chats pass no
+// bots, and summaries left by /compact have no author, so neither shows one
+function ReplyAuthor({ botId, bots }: { botId?: string; bots?: ChatBot[] }) {
+  if (!bots || !botId) {
+    return null
+  }
+  return (
+    <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+      <BotLabel botId={botId} bots={bots} />
     </div>
+  )
+}
+
+type HandoffPart = Extract<
+  ChatUIMessage["parts"][number],
+  { type: "tool-handoff" }
+>
+
+// The bot a message was handed to, answering in a bubble of its own under
+// the brief it was given. Its reply streams in as the handoff's output
+function HandoffReplyMessage({
+  part,
+  bots,
+}: {
+  part: HandoffPart
+  bots?: ChatBot[]
+}) {
+  const reply = part.state === "output-available" ? part.output : undefined
+  // The input streams in too, so the name can be missing for a moment
+  const name = part.input?.bot
+  const botId = reply?.botId ?? bots?.find((bot) => bot.name === name)?.id
+  const groups = reply ? replyGroups(reply.message.parts) : []
+
+  return (
+    <Message from="assistant">
+      <ReplyAuthor botId={botId} bots={bots} />
+      {part.input?.brief && (
+        <p
+          className="line-clamp-2 text-xs text-muted-foreground italic"
+          title={part.input.brief}
+        >
+          {part.input.brief}
+        </p>
+      )}
+      <MessageContent>
+        <ReplyGroups groups={groups} />
+        {part.state === "output-error" ? (
+          <p className="text-sm text-destructive">
+            {name ?? "The bot"} couldn&apos;t finish: {part.errorText}
+          </p>
+        ) : (
+          groups.length === 0 && (
+            <Shimmer className="text-sm" duration={1.5}>
+              {name ? `Handing over to ${name}…` : "Handing over…"}
+            </Shimmer>
+          )
+        )}
+      </MessageContent>
+    </Message>
+  )
+}
+
+function ReplyGroups({ groups }: { groups: ReplyGroup[] }) {
+  return groups.map((group) =>
+    group.kind === "tools" ? (
+      <ToolSteps key={group.key} parts={group.parts} />
+    ) : (
+      <MessageResponse key={group.key}>{group.text}</MessageResponse>
+    )
   )
 }
 
@@ -418,9 +503,21 @@ type PartGroup =
   | { kind: "text"; key: string; text: string }
   | { kind: "tools"; key: string; parts: AgentStepPart[] }
   | { kind: "injected"; key: string; text: string }
+  | { kind: "handoff"; key: string; part: HandoffPart }
+
+type ReplyGroup = Extract<PartGroup, { kind: "text" | "tools" }>
+
+// A handed-off bot's reply, which has no injections or handoffs of its own
+function replyGroups(parts: ChatUIMessage["parts"]) {
+  return groupParts(parts, () => []).filter(
+    (group): group is ReplyGroup =>
+      group.kind === "text" || group.kind === "tools"
+  )
+}
 
 // Consecutive thoughts and tool calls render as one timeline between the text
-// around them. Messages the user sent mid-reply mark where the agent took them in
+// around them. Messages the user sent mid-reply mark where the agent took them
+// in, and handoffs where another bot answered
 function groupParts(
   parts: ChatUIMessage["parts"],
   getInjectedMessages: (part: unknown) => InjectedMessage[]
@@ -432,6 +529,8 @@ function groupParts(
       injected.forEach((message) =>
         groups.push({ kind: "injected", key: message.id, text: message.text })
       )
+    } else if (part.type === "tool-handoff") {
+      groups.push({ kind: "handoff", key: part.toolCallId, part })
     } else if (part.type === "text") {
       if (part.text.trim()) {
         groups.push({ kind: "text", key: `text-${i}`, text: part.text })
@@ -457,18 +556,15 @@ function groupParts(
 }
 
 type Segment =
-  | { kind: "injected"; key: string; text: string }
-  | {
-      kind: "reply"
-      key: string
-      groups: Exclude<PartGroup, { kind: "injected" }>[]
-    }
+  | Extract<PartGroup, { kind: "injected" | "handoff" }>
+  | { kind: "reply"; key: string; groups: ReplyGroup[] }
 
-// A reply steered mid-way shows as reply, user message, reply
+// A reply steered mid-way shows as reply, user message, reply. A handoff
+// shows as a reply of its own, from the bot it went to
 function splitAtInjections(messageId: string, groups: PartGroup[]) {
   const segments: Segment[] = []
   for (const group of groups) {
-    if (group.kind === "injected") {
+    if (group.kind === "injected" || group.kind === "handoff") {
       segments.push(group)
       continue
     }

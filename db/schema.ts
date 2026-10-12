@@ -1,6 +1,6 @@
 // Define tables here, then run `npm run db:push`.
 // https://orm.drizzle.team/docs/sql-schema-declaration
-import { relations } from "drizzle-orm"
+import { relations, sql } from "drizzle-orm"
 import {
   index,
   integer,
@@ -9,10 +9,13 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
 } from "drizzle-orm/pg-core"
 import { createInsertSchema } from "drizzle-zod"
 import { nanoid } from "nanoid"
 import { z } from "zod"
+
+import { AUTO_BOT_NAME } from "@/lib/group-chat"
 
 export const bots = pgTable(
   "bots",
@@ -37,7 +40,15 @@ export const bots = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (table) => [index("bots_user_id_idx").on(table.userId)]
+  (table) => [
+    index("bots_user_id_idx").on(table.userId),
+    // Bots are told apart by name, as in group chats' handoffs, so a user's
+    // bots can't share one, whatever the case
+    uniqueIndex("bots_user_id_name_idx").on(
+      table.userId,
+      sql`lower(${table.name})`
+    ),
+  ]
 )
 
 // Fields a user fills in; userId comes from the session, the rest from defaults
@@ -46,7 +57,12 @@ export const insertBotSchema = createInsertSchema(bots, {
     schema
       .trim()
       .min(1, "Give your bot a name.")
-      .max(50, "Keep it under 50 characters."),
+      .max(50, "Keep it under 50 characters.")
+      // Group chats' coordinator goes by this name
+      .refine(
+        (name) => name.toLowerCase() !== AUTO_BOT_NAME.toLowerCase(),
+        `${AUTO_BOT_NAME} is taken by group chats' coordinator.`
+      ),
   avatar: (schema) => schema.min(1),
   job: (schema) =>
     schema

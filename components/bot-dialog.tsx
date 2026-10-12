@@ -130,6 +130,10 @@ function BotDialog({
       ? await updateBot(bot.id, values)
       : await createBot(values)
     if (!result.success) {
+      if (result.field) {
+        form.setError(result.field, { message: result.error })
+        return
+      }
       toast.add({
         title: bot ? "Couldn't save bot" : "Couldn't create bot",
         description: result.error,
