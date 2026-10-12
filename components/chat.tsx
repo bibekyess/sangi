@@ -235,9 +235,9 @@ function ChatView({
     if (!text.trim()) {
       return
     }
-    const command = text.trim()
-    if (command === "/clear" || command === "/compact") {
-      void runCommand(command)
+    const command = COMMANDS.find(({ name }) => text.trim() === `/${name}`)
+    if (command) {
+      void runCommand(command.name)
       return
     }
     if (!bots || !botId) {
@@ -281,22 +281,22 @@ function ChatView({
   }
 
   // Both rewrite the history, which a running reply is still adding to
-  async function runCommand(command: "/clear" | "/compact") {
+  async function runCommand(command: CommandName) {
     if (status !== "ready" && status !== "error") {
       toast.add({
-        title: `Can't ${command.slice(1)} yet`,
+        title: `Can't ${command} yet`,
         description: "Wait for the reply to finish, or stop it, first.",
         type: "error",
       })
       return
     }
-    if (command === "/compact" && visibleMessages.length === 0) {
+    if (command === "compact" && visibleMessages.length === 0) {
       toast.add({ title: "Nothing to summarize yet", type: "info" })
       return
     }
     setIsRunningCommand(true)
     try {
-      await (command === "/clear" ? clearHistory() : compactHistory())
+      await (command === "clear" ? clearHistory() : compactHistory())
     } finally {
       setIsRunningCommand(false)
     }
@@ -437,9 +437,9 @@ type ComposerProps = {
   stop: () => void
 }
 
-// Where the person writes. In a group chat, typing @ lists the bots to
-// address, narrowed by what follows it, and the footer shows who the message
-// goes to
+// Where the person writes. Typing / at the start lists the commands, and in a
+// group chat typing @ lists the bots to address, both narrowed by what
+// follows. A group chat's footer shows who the message goes to
 function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
   const { textInput } = usePromptInputController()
   const textarea = React.useRef<HTMLTextAreaElement>(null)
@@ -447,17 +447,17 @@ function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
   const [caret, setCaret] = React.useState(0)
   const [isFocused, setIsFocused] = React.useState(false)
   const [active, setActive] = React.useState(0)
-  // The @ whose list Escape closed, so it stays closed until another @
+  // The @ or / whose list Escape closed, so it stays closed until another
   const [dismissedAt, setDismissedAt] = React.useState<number>()
 
-  const query = bots ? mentionQuery(textInput.value, caret, bots) : undefined
+  const query = suggestionQuery(textInput.value, caret, bots)
   const options =
-    bots && query && isFocused && query.start !== dismissedAt
-      ? mentionOptions(query.text, bots)
+    query && isFocused && query.start !== dismissedAt
+      ? suggestions(query, bots)
       : []
   const isOpen = options.length > 0
   const activeIndex = Math.min(active, options.length - 1)
-  const optionId = (option: MentionOption) => `${listId}-${option.id}`
+  const optionId = (option: Suggestion) => `${listId}-${option.id}`
   const recipient =
     bots && botId ? recipientBotId(textInput.value, bots, botId) : undefined
 
@@ -467,21 +467,24 @@ function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
       setCaret(position)
       setActive(0)
     }
-    if (!bots || !mentionQuery(event.currentTarget.value, position, bots)) {
+    if (!suggestionQuery(event.currentTarget.value, position, bots)) {
       setDismissedAt(undefined)
     }
   }
 
-  function insertMention(option: MentionOption) {
+  // Completes the / or @ being typed. A command is only filled in, so /clear
+  // never runs from a half-typed /cl
+  function pick(option: Suggestion) {
     if (!query) {
       return
     }
-    const mention = `@${option.name} `
+    const completion =
+      option.kind === "command" ? `/${option.name}` : `@${option.name} `
     const value = textInput.value
     textInput.setInput(
-      value.slice(0, query.start) + mention + value.slice(caret)
+      value.slice(0, query.start) + completion + value.slice(caret)
     )
-    const position = query.start + mention.length
+    const position = query.start + completion.length
     setCaret(position)
     // The textarea holds the new text once React has rendered it
     requestAnimationFrame(() => {
@@ -491,10 +494,19 @@ function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
   }
 
   // Runs before the textarea's own handler, which a prevented key skips, so
-  // Enter picks a bot rather than sending
+  // Enter picks from the list rather than sending
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     // Shift+Enter still starts a new line
     if (!isOpen || event.nativeEvent.isComposing || event.shiftKey) {
+      return
+    }
+    // A command typed out in full sends as usual, which runs it
+    const option = options[activeIndex]
+    if (
+      event.key === "Enter" &&
+      option.kind === "command" &&
+      query?.text === option.name
+    ) {
       return
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -503,7 +515,7 @@ function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
       setActive((activeIndex + step + options.length) % options.length)
     } else if (event.key === "Enter" || event.key === "Tab") {
       event.preventDefault()
-      insertMention(options[activeIndex])
+      pick(option)
     } else if (event.key === "Escape") {
       event.preventDefault()
       setDismissedAt(query?.start)
@@ -512,12 +524,14 @@ function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
 
   return (
     <div className="relative">
-      {isOpen && bots && (
+      {isOpen && (
         <div
           id={listId}
           role="listbox"
-          aria-label="Bots to address"
-          className="absolute bottom-full left-0 z-10 mb-2 w-64 rounded-lg border bg-popover p-1 text-popover-foreground shadow-md"
+          aria-label={
+            query?.kind === "command" ? "Commands" : "Bots to address"
+          }
+          className="absolute bottom-full left-0 z-10 mb-2 w-72 rounded-lg border bg-popover p-1 text-popover-foreground shadow-md"
         >
           {options.map((option, i) => (
             <div
@@ -527,14 +541,23 @@ function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
               aria-selected={i === activeIndex}
               // Keeps focus in the textarea, which the pick goes back into
               onMouseDown={(event) => event.preventDefault()}
-              onClick={() => insertMention(option)}
+              onClick={() => pick(option)}
               onMouseEnter={() => setActive(i)}
               className={cn(
                 "flex cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-sm",
                 i === activeIndex && "bg-accent text-accent-foreground"
               )}
             >
-              <BotLabel botId={option.id} bots={bots} />
+              {option.kind === "command" ? (
+                <>
+                  <span className="font-medium">/{option.name}</span>
+                  <span className="truncate text-muted-foreground">
+                    {option.description}
+                  </span>
+                </>
+              ) : (
+                <BotLabel botId={option.id} bots={bots ?? []} />
+              )}
             </div>
           ))}
         </div>
@@ -545,16 +568,16 @@ function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
             ref={textarea}
             placeholder={
               bots
-                ? "Message the group, @ to pick a bot, /compact to summarize or /clear to start over..."
-                : "Send a message, /compact to summarize or /clear to start over..."
+                ? "Start with @name to choose who answers, or / for commands..."
+                : "Send a message, or / for commands..."
             }
             onChange={trackCaret}
             onSelect={trackCaret}
             onKeyDown={handleKeyDown}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
-            role={bots ? "combobox" : undefined}
-            aria-expanded={bots ? isOpen : undefined}
+            role="combobox"
+            aria-expanded={isOpen}
             aria-controls={isOpen ? listId : undefined}
             aria-activedescendant={
               isOpen ? optionId(options[activeIndex]) : undefined
@@ -580,32 +603,69 @@ function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
   )
 }
 
-// The @ being typed at the caret, and what follows it so far. Only mentions a
-// message opens with pick who answers, so it has to come before any other
-// text. What follows can hold spaces, as names can, but a space last means
-// the name is done, so "@Code " doesn't offer "@Code Reviewer" again
-function mentionQuery(text: string, caret: number, bots: ChatBot[]) {
-  const match = /(?:^|\s)@([^@\n]*)$/.exec(text.slice(0, caret))
-  if (!match || /\s$/.test(match[1])) {
+// Typed in place of a message rather than sent to the bot
+const COMMANDS = [
+  {
+    name: "compact",
+    description: "Summarize the conversation to keep answers sharp",
+  },
+  { name: "clear", description: "Start over with an empty conversation" },
+] as const
+
+type CommandName = (typeof COMMANDS)[number]["name"]
+
+type SuggestionQuery = { kind: "command" | "bot"; start: number; text: string }
+
+type Suggestion =
+  | { kind: "command"; id: string; name: string; description: string }
+  | { kind: "bot"; id: string; name: string }
+
+// The / or @ being typed at the caret, and what follows it so far. A command
+// is the whole message, so its / comes first with nothing after the caret.
+// Only mentions a message opens with pick who answers, so an @ has to come
+// before any other text. What follows it can hold spaces, as names can, but a
+// space last means the name is done, so "@Code " doesn't offer "@Code
+// Reviewer" again
+function suggestionQuery(
+  text: string,
+  caret: number,
+  bots?: ChatBot[]
+): SuggestionQuery | undefined {
+  const before = text.slice(0, caret)
+  const command = /^\s*\/([a-z]*)$/i.exec(before)
+  if (command && !text.slice(caret).trim()) {
+    const start = caret - command[1].length - 1
+    return { kind: "command", start, text: command[1] }
+  }
+  if (!bots) {
     return undefined
   }
-  const start = caret - match[1].length - 1
+  const mention = /(?:^|\s)@([^@\n]*)$/.exec(before)
+  if (!mention || /\s$/.test(mention[1])) {
+    return undefined
+  }
+  const start = caret - mention[1].length - 1
   if (splitLeadingMentions(text.slice(0, start), bots).rest.trim()) {
     return undefined
   }
-  return { start, text: match[1] }
+  return { kind: "bot", start, text: mention[1] }
 }
 
-type MentionOption = { id: string; name: string }
-
-// Auto and the group's bots whose names hold the query, those starting with
-// it first
-function mentionOptions(query: string, bots: ChatBot[]) {
-  const needle = query.toLowerCase()
-  const options: MentionOption[] = [
+// The commands starting with the query, or Auto and the group's bots whose
+// names hold it, those starting with it first
+function suggestions(query: SuggestionQuery, bots?: ChatBot[]): Suggestion[] {
+  const needle = query.text.toLowerCase()
+  if (query.kind === "command") {
+    return COMMANDS.filter((command) => command.name.startsWith(needle)).map(
+      (command) => ({ kind: "command", id: command.name, ...command })
+    )
+  }
+  const options: Suggestion[] = [
     { id: AUTO_BOT_ID, name: AUTO_BOT_NAME },
-    ...bots,
-  ].filter((option) => option.name.toLowerCase().includes(needle))
+    ...(bots ?? []),
+  ]
+    .filter((bot) => bot.name.toLowerCase().includes(needle))
+    .map((bot) => ({ kind: "bot", id: bot.id, name: bot.name }))
   return options.sort(
     (a, b) =>
       Number(b.name.toLowerCase().startsWith(needle)) -
