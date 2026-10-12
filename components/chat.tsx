@@ -32,14 +32,11 @@ import {
   PromptInput,
   PromptInputBody,
   PromptInputFooter,
-  PromptInputSelect,
-  PromptInputSelectContent,
-  PromptInputSelectItem,
-  PromptInputSelectTrigger,
-  PromptInputSelectValue,
+  PromptInputProvider,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
+  usePromptInputController,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input"
 import { Shimmer } from "@/components/ai-elements/shimmer"
@@ -54,7 +51,13 @@ import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/components/ui/toast"
 import type { Bot } from "@/db/schema"
 import { summaryMessage } from "@/lib/compaction"
-import { AUTO_BOT_ID, AUTO_BOT_NAME } from "@/lib/group-chat"
+import {
+  AUTO_BOT_ID,
+  AUTO_BOT_NAME,
+  recipientBotId,
+  splitLeadingMentions,
+} from "@/lib/group-chat"
+import { cn } from "@/lib/utils"
 import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
 
 type ChatTransport = ReturnType<typeof useTriggerChatTransport>
@@ -89,10 +92,11 @@ function readSession(chatId: string): ChatSessionPersistedState | undefined {
   }
 }
 
-// `bots` is passed for group chats, whose messages go to the bot picked in
-// the composer, or to Auto, which hands them on. Direct chats leave it out and
+// `bots` is passed for group chats, whose messages go to the bot they
+// @mention, or to Auto, which hands them on. Direct chats leave it out and
 // always reach their one bot
 export function Chat({ chatId, bots }: { chatId: string; bots?: ChatBot[] }) {
+  // The bot last addressed, which a message that @mentions no one goes to
   const [pick, setPick] = React.useState(AUTO_BOT_ID)
   // A bot removed from the group falls back to Auto
   const botId = bots
@@ -236,7 +240,44 @@ function ChatView({
       void runCommand(command)
       return
     }
-    pending.steer(text)
+    if (!bots || !botId) {
+      pending.steer(text)
+      return
+    }
+    // In a group chat, the @mentions a message opens with pick who answers,
+    // and stay picked. A message without one goes to the bot last addressed,
+    // and names it, so the chat and the bots can tell who each was for
+    const { botIds, rest } = splitLeadingMentions(text, bots)
+    const target = recipientBotId(text, bots, botId)
+    const isReplying = status === "submitted" || status === "streaming"
+    if (isReplying && target !== botId) {
+      toast.add({
+        title: "Can't switch bots mid-reply",
+        description: "Wait for the reply to finish, or stop it, first.",
+        type: "error",
+      })
+      // A failed submit leaves the message in the composer to send later
+      return Promise.reject(new Error("Bot switched mid-reply"))
+    }
+    // Sent mid-reply, it joins whichever bot is answering, which after a
+    // handoff isn't the one addressed, so it isn't named
+    if (isReplying) {
+      pending.steer(text)
+      return
+    }
+    onBotChange(target)
+    // "@Coder" alone only switches who later messages go to
+    if (!rest.trim()) {
+      return
+    }
+    const name =
+      target === AUTO_BOT_ID
+        ? AUTO_BOT_NAME
+        : bots.find((bot) => bot.id === target)?.name
+    const message = botIds.length > 0 || !name ? text : `@${name} ${text}`
+    // The transport's clientData still holds the old pick until the next
+    // render, so the pick goes with the message too
+    void sendMessage({ text: message }, { metadata: { botId: target } })
   }
 
   // Both rewrite the history, which a running reply is still adding to
@@ -310,7 +351,9 @@ function ChatView({
               ).map((segment) =>
                 segment.kind === "injected" ? (
                   <Message from="user" key={segment.key}>
-                    <MessageContent>{segment.text}</MessageContent>
+                    <MessageContent>
+                      <AddressedText text={segment.text} bots={bots} />
+                    </MessageContent>
                   </Message>
                 ) : segment.kind === "handoff" ? (
                   <HandoffReplyMessage
@@ -327,7 +370,19 @@ function ChatView({
                       />
                     )}
                     <MessageContent>
-                      <ReplyGroups groups={segment.groups} />
+                      {message.role === "user" ? (
+                        <AddressedText
+                          text={segment.groups
+                            .flatMap((group) =>
+                              group.kind === "text" ? [group.text] : []
+                            )
+                            .join("\n\n")}
+                          bots={bots}
+                          markdown
+                        />
+                      ) : (
+                        <ReplyGroups groups={segment.groups} />
+                      )}
                     </MessageContent>
                   </Message>
                 )
@@ -340,7 +395,9 @@ function ChatView({
             .filter((message) => !injectedIds.has(message.id))
             .map((message) => (
               <Message from="user" key={message.id} className="opacity-60">
-                <MessageContent>{message.text}</MessageContent>
+                <MessageContent>
+                  <AddressedText text={message.text} bots={bots} />
+                </MessageContent>
               </Message>
             ))}
           {isCompacting ? (
@@ -358,60 +415,257 @@ function ChatView({
         <ConversationScrollButton />
       </Conversation>
       <div className="mx-auto w-full max-w-3xl p-4 pt-0">
-        <PromptInput onSubmit={handleSubmit}>
-          <PromptInputBody>
-            <PromptInputTextarea placeholder="Send a message, /compact to summarize or /clear to start over..." />
-          </PromptInputBody>
-          <PromptInputFooter className={bots ? undefined : "justify-end"}>
-            {bots && botId && (
-              <PromptInputTools>
-                {/* A message sent mid-reply joins the running reply, so the
-                    bot can only change between replies */}
-                <PromptInputSelect
-                  value={botId}
-                  onValueChange={(value) =>
-                    typeof value === "string" && onBotChange(value)
-                  }
-                  disabled={status === "submitted" || status === "streaming"}
-                >
-                  <PromptInputSelectTrigger aria-label="Bot to talk to">
-                    <PromptInputSelectValue>
-                      <BotLabel botId={botId} bots={bots} />
-                    </PromptInputSelectValue>
-                  </PromptInputSelectTrigger>
-                  <PromptInputSelectContent>
-                    <PromptInputSelectItem value={AUTO_BOT_ID}>
-                      <BotLabel botId={AUTO_BOT_ID} bots={bots} />
-                    </PromptInputSelectItem>
-                    {bots.map((bot) => (
-                      <PromptInputSelectItem key={bot.id} value={bot.id}>
-                        <BotLabel botId={bot.id} bots={bots} />
-                      </PromptInputSelectItem>
-                    ))}
-                  </PromptInputSelectContent>
-                </PromptInputSelect>
-              </PromptInputTools>
-            )}
-            {/* Until the reply starts there is no turn to steer, so wait */}
-            <PromptInputSubmit
-              status={status}
-              onStop={stop}
-              disabled={status === "submitted"}
-            />
-          </PromptInputFooter>
-        </PromptInput>
+        <PromptInputProvider>
+          <Composer
+            onSubmit={handleSubmit}
+            bots={bots}
+            botId={botId}
+            status={status}
+            stop={stop}
+          />
+        </PromptInputProvider>
       </div>
     </div>
   )
 }
 
-// A bot, or Auto, with its face, as the composer's picker shows it
-function BotLabel({ botId, bots }: { botId: string; bots: ChatBot[] }) {
+type ComposerProps = {
+  onSubmit: (message: PromptInputMessage) => void | Promise<never>
+  bots?: ChatBot[]
+  botId?: string
+  status: ReturnType<typeof useChat>["status"]
+  stop: () => void
+}
+
+// Where the person writes. In a group chat, typing @ lists the bots to
+// address, narrowed by what follows it, and the footer shows who the message
+// goes to
+function Composer({ onSubmit, bots, botId, status, stop }: ComposerProps) {
+  const { textInput } = usePromptInputController()
+  const textarea = React.useRef<HTMLTextAreaElement>(null)
+  const listId = React.useId()
+  const [caret, setCaret] = React.useState(0)
+  const [isFocused, setIsFocused] = React.useState(false)
+  const [active, setActive] = React.useState(0)
+  // The @ whose list Escape closed, so it stays closed until another @
+  const [dismissedAt, setDismissedAt] = React.useState<number>()
+
+  const query = bots ? mentionQuery(textInput.value, caret, bots) : undefined
+  const options =
+    bots && query && isFocused && query.start !== dismissedAt
+      ? mentionOptions(query.text, bots)
+      : []
+  const isOpen = options.length > 0
+  const activeIndex = Math.min(active, options.length - 1)
+  const optionId = (option: MentionOption) => `${listId}-${option.id}`
+  const recipient =
+    bots && botId ? recipientBotId(textInput.value, bots, botId) : undefined
+
+  function trackCaret(event: React.SyntheticEvent<HTMLTextAreaElement>) {
+    const position = event.currentTarget.selectionStart
+    if (position !== caret) {
+      setCaret(position)
+      setActive(0)
+    }
+    if (!bots || !mentionQuery(event.currentTarget.value, position, bots)) {
+      setDismissedAt(undefined)
+    }
+  }
+
+  function insertMention(option: MentionOption) {
+    if (!query) {
+      return
+    }
+    const mention = `@${option.name} `
+    const value = textInput.value
+    textInput.setInput(
+      value.slice(0, query.start) + mention + value.slice(caret)
+    )
+    const position = query.start + mention.length
+    setCaret(position)
+    // The textarea holds the new text once React has rendered it
+    requestAnimationFrame(() => {
+      textarea.current?.focus()
+      textarea.current?.setSelectionRange(position, position)
+    })
+  }
+
+  // Runs before the textarea's own handler, which a prevented key skips, so
+  // Enter picks a bot rather than sending
+  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Shift+Enter still starts a new line
+    if (!isOpen || event.nativeEvent.isComposing || event.shiftKey) {
+      return
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault()
+      const step = event.key === "ArrowDown" ? 1 : -1
+      setActive((activeIndex + step + options.length) % options.length)
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault()
+      insertMention(options[activeIndex])
+    } else if (event.key === "Escape") {
+      event.preventDefault()
+      setDismissedAt(query?.start)
+    }
+  }
+
+  return (
+    <div className="relative">
+      {isOpen && bots && (
+        <div
+          id={listId}
+          role="listbox"
+          aria-label="Bots to address"
+          className="absolute bottom-full left-0 z-10 mb-2 w-64 rounded-lg border bg-popover p-1 text-popover-foreground shadow-md"
+        >
+          {options.map((option, i) => (
+            <div
+              key={option.id}
+              id={optionId(option)}
+              role="option"
+              aria-selected={i === activeIndex}
+              // Keeps focus in the textarea, which the pick goes back into
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => insertMention(option)}
+              onMouseEnter={() => setActive(i)}
+              className={cn(
+                "flex cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-sm",
+                i === activeIndex && "bg-accent text-accent-foreground"
+              )}
+            >
+              <BotLabel botId={option.id} bots={bots} />
+            </div>
+          ))}
+        </div>
+      )}
+      <PromptInput onSubmit={onSubmit}>
+        <PromptInputBody>
+          <PromptInputTextarea
+            ref={textarea}
+            placeholder={
+              bots
+                ? "Message the group, @ to pick a bot, /compact to summarize or /clear to start over..."
+                : "Send a message, /compact to summarize or /clear to start over..."
+            }
+            onChange={trackCaret}
+            onSelect={trackCaret}
+            onKeyDown={handleKeyDown}
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            role={bots ? "combobox" : undefined}
+            aria-expanded={bots ? isOpen : undefined}
+            aria-controls={isOpen ? listId : undefined}
+            aria-activedescendant={
+              isOpen ? optionId(options[activeIndex]) : undefined
+            }
+          />
+        </PromptInputBody>
+        <PromptInputFooter className={recipient ? undefined : "justify-end"}>
+          {bots && recipient && (
+            <PromptInputTools className="gap-1.5 px-2 text-xs text-muted-foreground">
+              To
+              <BotLabel botId={recipient} bots={bots} mention />
+            </PromptInputTools>
+          )}
+          {/* Until the reply starts there is no turn to steer, so wait */}
+          <PromptInputSubmit
+            status={status}
+            onStop={stop}
+            disabled={status === "submitted"}
+          />
+        </PromptInputFooter>
+      </PromptInput>
+    </div>
+  )
+}
+
+// The @ being typed at the caret, and what follows it so far. Only mentions a
+// message opens with pick who answers, so it has to come before any other
+// text. What follows can hold spaces, as names can, but a space last means
+// the name is done, so "@Code " doesn't offer "@Code Reviewer" again
+function mentionQuery(text: string, caret: number, bots: ChatBot[]) {
+  const match = /(?:^|\s)@([^@\n]*)$/.exec(text.slice(0, caret))
+  if (!match || /\s$/.test(match[1])) {
+    return undefined
+  }
+  const start = caret - match[1].length - 1
+  if (splitLeadingMentions(text.slice(0, start), bots).rest.trim()) {
+    return undefined
+  }
+  return { start, text: match[1] }
+}
+
+type MentionOption = { id: string; name: string }
+
+// Auto and the group's bots whose names hold the query, those starting with
+// it first
+function mentionOptions(query: string, bots: ChatBot[]) {
+  const needle = query.toLowerCase()
+  const options: MentionOption[] = [
+    { id: AUTO_BOT_ID, name: AUTO_BOT_NAME },
+    ...bots,
+  ].filter((option) => option.name.toLowerCase().includes(needle))
+  return options.sort(
+    (a, b) =>
+      Number(b.name.toLowerCase().startsWith(needle)) -
+      Number(a.name.toLowerCase().startsWith(needle))
+  )
+}
+
+// What the person wrote, with the bots it opens by addressing shown as chips.
+// Saved messages are Markdown; ones still on their way show as typed
+function AddressedText({
+  text,
+  bots,
+  markdown = false,
+}: {
+  text: string
+  bots?: ChatBot[]
+  markdown?: boolean
+}) {
+  const { botIds, rest } = bots
+    ? splitLeadingMentions(text, bots)
+    : { botIds: [], rest: text }
+  return (
+    <>
+      {bots && botIds.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {botIds.map((botId) => (
+            <span
+              key={botId}
+              className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"
+            >
+              <BotLabel botId={botId} bots={bots} mention />
+            </span>
+          ))}
+        </div>
+      )}
+      {rest && (markdown ? <MessageResponse>{rest}</MessageResponse> : rest)}
+    </>
+  )
+}
+
+// A bot, or Auto, with its face, as the composer and replies show it. A
+// `mention` reads as @Name, the way a message addresses it
+function BotLabel({
+  botId,
+  bots,
+  mention = false,
+}: {
+  botId: string
+  bots: ChatBot[]
+  mention?: boolean
+}) {
+  const at = mention ? "@" : ""
   if (botId === AUTO_BOT_ID) {
     return (
       <>
         <SparklesIcon className="size-4" />
-        <span className="truncate">{AUTO_BOT_NAME}</span>
+        <span className="truncate">
+          {at}
+          {AUTO_BOT_NAME}
+        </span>
       </>
     )
   }
@@ -422,7 +676,10 @@ function BotLabel({ botId, bots }: { botId: string; bots: ChatBot[] }) {
   return (
     <>
       <ChatAvatar seed={bot.avatar} className="size-4" />
-      <span className="truncate">{bot.name}</span>
+      <span className="truncate">
+        {at}
+        {bot.name}
+      </span>
     </>
   )
 }

@@ -21,12 +21,14 @@ This is a group chat between the person and several bots. The others are:
 
 ${listBots(mates)}
 
-Earlier assistant replies may have come from the other bots rather than you, so don't treat what they said or did as your own. Each bot has its own sandbox, so files another bot saved aren't on yours.`
+Earlier assistant replies may have come from the other bots rather than you, so don't treat what they said or did as your own. Each bot has its own sandbox, so files another bot saved aren't on yours.
+
+The person addresses a bot by writing @ and its name at the start of a message. Earlier messages addressed to another bot weren't meant for you, though you can use what they say.`
 
   if (!handedOffBy) {
     return `${intro}
 
-The person picked you to answer this message. If it clearly fits another bot's job better than yours, call handoff with that bot's name and a brief instead of answering. That bot then answers the person in your place and your turn ends, so write nothing after it. Decide before you start the work, not halfway through, and do anything within your own job yourself.`
+The person addressed this message to you. If it clearly fits another bot's job better than yours, call handoff with that bot's name and a brief instead of answering. That bot then answers the person in your place and your turn ends, so write nothing after it. Decide before you start the work, not halfway through, and do anything within your own job yourself.`
   }
 
   const readBy =
@@ -125,7 +127,7 @@ Each bot has its own sandbox: a cloud computer with a browser, files and a termi
 
 ## How you work
 
-1. Read the person's message and pick the bot whose job fits it best.
+1. Read the person's message and pick the bot whose job fits it best. A message that opens by addressing several bots with @ is for those bots: hand it to each of them, in the order the work needs.
 2. Call handoff with that bot's name and a brief: what you need from it, and anything it needs from other bots' replies. It sees the conversation, so focus on the ask rather than retelling it.
 3. The bot works on it and replies to the person directly, and you get its reply back. Read it, then decide:
    - The message is answered: stop.
