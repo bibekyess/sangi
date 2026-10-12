@@ -31,11 +31,18 @@ import {
   PromptInput,
   PromptInputBody,
   PromptInputFooter,
+  PromptInputSelect,
+  PromptInputSelectContent,
+  PromptInputSelectItem,
+  PromptInputSelectTrigger,
+  PromptInputSelectValue,
   PromptInputSubmit,
   PromptInputTextarea,
+  PromptInputTools,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input"
 import { Shimmer } from "@/components/ai-elements/shimmer"
+import { ChatAvatar } from "@/components/chat-avatar"
 import {
   isReasoningPart,
   isToolCallPart,
@@ -44,10 +51,13 @@ import {
 } from "@/components/tool-call"
 import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/components/ui/toast"
+import type { Bot } from "@/db/schema"
 import { summaryMessage } from "@/lib/compaction"
 import type { chatAgent, ChatUIMessage } from "@/trigger/chat"
 
 type ChatTransport = ReturnType<typeof useTriggerChatTransport>
+
+type ChatBot = Pick<Bot, "id" | "name" | "avatar">
 
 function sessionKey(chatId: string) {
   return `chat-session:${chatId}`
@@ -77,13 +87,21 @@ function readSession(chatId: string): ChatSessionPersistedState | undefined {
   }
 }
 
-export function Chat({ chatId }: { chatId: string }) {
+// `bots` is passed for group chats, whose messages go to the bot picked in
+// the composer. Direct chats leave it out and always reach their one bot
+export function Chat({ chatId, bots }: { chatId: string; bots?: ChatBot[] }) {
+  const [botId, setBotId] = React.useState(bots?.[0]?.id)
+  // A bot removed from the group falls back to the first one left
+  const bot = bots?.find((bot) => bot.id === botId) ?? bots?.[0]
+  // clientData goes out with every message, so each turn reaches the bot
+  // picked when it was sent
   const transport = useTriggerChatTransport<typeof chatAgent>({
     task: "chat",
     accessToken: ({ chatId }) => mintChatAccessToken(chatId),
     startSession: ({ chatId, clientData }) =>
       startChatSession({ chatId, clientData }),
     onSessionChange: saveSession,
+    clientData: { botId: bot?.id },
   })
   // Restored before the transcript loads. Its saved cursor is dropped so the
   // transcript's takes over: a reply still running started after the history
@@ -114,6 +132,9 @@ export function Chat({ chatId }: { chatId: string }) {
       chatId={chatId}
       initialMessages={messages}
       transport={transport}
+      bots={bots}
+      bot={bot}
+      onBotChange={setBotId}
     />
   )
 }
@@ -122,10 +143,16 @@ function ChatView({
   chatId,
   initialMessages,
   transport,
+  bots,
+  bot,
+  onBotChange,
 }: {
   chatId: string
   initialMessages: ChatUIMessage[]
   transport: ChatTransport
+  bots?: ChatBot[]
+  bot?: ChatBot
+  onBotChange: (botId: string) => void
 }) {
   // Set while the agent summarises the history, after a long reply or for /compact
   const [isCompacting, setIsCompacting] = React.useState(false)
@@ -280,6 +307,13 @@ function ChatView({
                   </Message>
                 ) : (
                   <Message from={message.role} key={segment.key}>
+                    {message.role === "assistant" && (
+                      <ReplyAuthor
+                        bot={bots?.find(
+                          (bot) => bot.id === message.metadata?.botId
+                        )}
+                      />
+                    )}
                     <MessageContent>
                       {segment.groups.map((group) =>
                         group.kind === "tools" ? (
@@ -324,7 +358,35 @@ function ChatView({
           <PromptInputBody>
             <PromptInputTextarea placeholder="Send a message, /compact to summarize or /clear to start over..." />
           </PromptInputBody>
-          <PromptInputFooter className="justify-end">
+          <PromptInputFooter className={bots ? undefined : "justify-end"}>
+            {bots && bot && (
+              <PromptInputTools>
+                {/* A message sent mid-reply joins the running reply, so the
+                    bot can only change between replies */}
+                <PromptInputSelect
+                  value={bot.id}
+                  onValueChange={(value) =>
+                    typeof value === "string" && onBotChange(value)
+                  }
+                  disabled={status === "submitted" || status === "streaming"}
+                >
+                  <PromptInputSelectTrigger aria-label="Bot to talk to">
+                    <PromptInputSelectValue>
+                      <ChatAvatar seed={bot.avatar} className="size-4" />
+                      <span className="truncate">{bot.name}</span>
+                    </PromptInputSelectValue>
+                  </PromptInputSelectTrigger>
+                  <PromptInputSelectContent>
+                    {bots.map((bot) => (
+                      <PromptInputSelectItem key={bot.id} value={bot.id}>
+                        <ChatAvatar seed={bot.avatar} className="size-4" />
+                        {bot.name}
+                      </PromptInputSelectItem>
+                    ))}
+                  </PromptInputSelectContent>
+                </PromptInputSelect>
+              </PromptInputTools>
+            )}
             {/* Until the reply starts there is no turn to steer, so wait */}
             <PromptInputSubmit
               status={status}
@@ -334,6 +396,20 @@ function ChatView({
           </PromptInputFooter>
         </PromptInput>
       </div>
+    </div>
+  )
+}
+
+// Which bot wrote a reply in a group chat. Direct chats pass no bots, and
+// summaries left by /compact have no author, so neither shows one
+function ReplyAuthor({ bot }: { bot?: ChatBot }) {
+  if (!bot) {
+    return null
+  }
+  return (
+    <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+      <ChatAvatar seed={bot.avatar} className="size-4" />
+      {bot.name}
     </div>
   )
 }

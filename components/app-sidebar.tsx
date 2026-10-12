@@ -3,6 +3,7 @@ import { formatDistanceToNowStrict } from "date-fns"
 import { ChatAvatar } from "@/components/chat-avatar"
 import { ChatMenuButton } from "@/components/chat-menu-button"
 import { ChatSearch } from "@/components/chat-search"
+import { GroupChatAvatar } from "@/components/group-chat-avatar"
 import { NewChatMenu } from "@/components/new-chat-menu"
 import {
   Sidebar,
@@ -18,16 +19,16 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 import { UserButton } from "@/components/user-button"
-import { getChats } from "@/queries/chats"
+import { getBots, getChats } from "@/queries/chats"
 
 export async function AppSidebar() {
-  const chats = await getChats()
+  const [chats, bots] = await Promise.all([getChats(), getBots()])
 
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
         <div className="flex justify-end">
-          <NewChatMenu />
+          <NewChatMenu bots={bots} />
         </div>
         <ChatSearch chats={chats} />
       </SidebarHeader>
@@ -37,36 +38,45 @@ export async function AppSidebar() {
           <SidebarGroupLabel>Chats</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {chats.map((chat) => (
-                <SidebarMenuItem key={chat.id}>
-                  {/* Collapsed, the avatar shrinks so the button's hover
+              {chats.map((chat) => {
+                const name = chat.name ?? chat.bots[0].name
+
+                return (
+                  <SidebarMenuItem key={chat.id}>
+                    {/* Collapsed, the avatar shrinks so the button's hover
                       background shows around it like the other icons. */}
-                  <ChatMenuButton
-                    chatId={chat.id}
-                    size="lg"
-                    tooltip={chat.name ?? chat.bot.name}
-                    className="group-data-[collapsible=icon]:justify-center"
-                  >
-                    <ChatAvatar
-                      seed={chat.bot.avatar}
-                      className="group-data-[collapsible=icon]:size-6"
-                    />
-                    <div className="flex min-w-0 flex-1 flex-col gap-0.5 group-data-[collapsible=icon]:hidden">
-                      <div className="flex items-baseline gap-2">
-                        <span className="truncate font-medium">
-                          {chat.name ?? chat.bot.name}
-                        </span>
-                        <span className="ms-auto shrink-0 text-xs text-muted-foreground">
-                          {formatDistanceToNowStrict(chat.lastMessageAt)}
+                    <ChatMenuButton
+                      chatId={chat.id}
+                      size="lg"
+                      tooltip={name}
+                      className="group-data-[collapsible=icon]:justify-center"
+                    >
+                      {chat.kind === "group" ? (
+                        <GroupChatAvatar
+                          seeds={chat.bots.map((bot) => bot.avatar)}
+                          className="group-data-[collapsible=icon]:size-6"
+                        />
+                      ) : (
+                        <ChatAvatar
+                          seed={chat.bots[0].avatar}
+                          className="group-data-[collapsible=icon]:size-6"
+                        />
+                      )}
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5 group-data-[collapsible=icon]:hidden">
+                        <div className="flex items-baseline gap-2">
+                          <span className="truncate font-medium">{name}</span>
+                          <span className="ms-auto shrink-0 text-xs text-muted-foreground">
+                            {formatDistanceToNowStrict(chat.lastMessageAt)}
+                          </span>
+                        </div>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {chat.lastMessagePreview}
                         </span>
                       </div>
-                      <span className="truncate text-xs text-muted-foreground">
-                        {chat.lastMessagePreview}
-                      </span>
-                    </div>
-                  </ChatMenuButton>
-                </SidebarMenuItem>
-              ))}
+                    </ChatMenuButton>
+                  </SidebarMenuItem>
+                )
+              })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

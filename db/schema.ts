@@ -12,7 +12,7 @@ import {
 } from "drizzle-orm/pg-core"
 import { createInsertSchema } from "drizzle-zod"
 import { nanoid } from "nanoid"
-import type { z } from "zod"
+import { z } from "zod"
 
 export const bots = pgTable(
   "bots",
@@ -117,10 +117,30 @@ export const chatMembersRelations = relations(chatMembers, ({ one }) => ({
   bot: one(bots, { fields: [chatMembers.botId], references: [bots.id] }),
 }))
 
+// A group chat's name and its bots. Members live in their own table, so the
+// bot list is added to the chat's fields rather than derived from a column
+export const insertGroupChatSchema = createInsertSchema(chats, {
+  // Required here, unlike direct chats, which show their bot's name. Replaced
+  // rather than refined: drizzle-zod makes a callback's result nullable again
+  name: z
+    .string()
+    .trim()
+    .min(1, "Give the group a name.")
+    .max(50, "Keep it under 50 characters."),
+})
+  .pick({ name: true })
+  .extend({
+    botIds: z
+      .array(z.string())
+      .min(2, "Pick at least two bots.")
+      .refine((ids) => new Set(ids).size === ids.length, "Pick each bot once."),
+  })
+
 export type Chat = typeof chats.$inferSelect
 export type NewChat = typeof chats.$inferInsert
 export type ChatMember = typeof chatMembers.$inferSelect
 export type NewChatMember = typeof chatMembers.$inferInsert
+export type InsertGroupChat = z.infer<typeof insertGroupChatSchema>
 
 // Screenshots of a bot's sandbox desktop. Too large for the chat stream, so
 // tool results carry only the ID and the image is fetched separately

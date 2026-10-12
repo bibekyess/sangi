@@ -70,30 +70,50 @@ export type CompactionData = {
   summary?: { id: string; text: string }
 }
 
+// Which bot wrote a reply, so group chats can show who answered
+export type ChatMessageMetadata = { botId?: string }
+
 export type ChatUIMessage = UIMessage<
-  unknown,
+  ChatMessageMetadata,
   { compaction: CompactionData },
   InferUITools<SandboxTools>
 >
 
-// The chat's first bot, the same one its header shows. Direct chats have only
-// one; group chats speak as the first to join until they get their own prompt
-async function getChatBot(chatId: string) {
-  const member = await db.query.chatMembers.findFirst({
-    where: (member, { eq }) => eq(member.chatId, chatId),
-    orderBy: (member, { asc }) => [asc(member.joinedAt)],
-    with: { bot: true },
+// The bot that answers this turn, and in a group chat the others with it. The
+// bot is the one picked in a group chat, or else the chat's first, which is a
+// direct chat's only bot. The pick comes from the browser, so it has to be
+// one of the chat's own bots
+async function getChatBots(chatId: string, botId?: string) {
+  const row = await db.query.chats.findFirst({
+    where: (chat, { eq }) => eq(chat.id, chatId),
+    columns: { kind: true },
+    with: {
+      members: {
+        orderBy: (member, { asc }) => [asc(member.joinedAt)],
+        with: { bot: true },
+      },
+    },
   })
-  if (!member) {
-    throw new Error(`No bot found for chat ${chatId}`)
+  const bots = row?.members.map((member) => member.bot) ?? []
+  const bot = botId ? bots.find((bot) => bot.id === botId) : bots[0]
+  if (!bot) {
+    throw new Error(
+      botId
+        ? `Bot ${botId} isn't in chat ${chatId}`
+        : `No bot found for chat ${chatId}`
+    )
   }
-  return member.bot
+  const groupMates =
+    row?.kind === "group" ? bots.filter((mate) => mate.id !== bot.id) : []
+  return { bot, groupMates }
 }
 
 // One long-lived run per chat. History is kept by the platform's default
 // transcript storage, keyed by chatId, and read back by loadChatTranscript
 export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   id: "chat",
+  // Sent with every message, so each turn can go to a different bot
+  clientDataSchema: z.object({ botId: z.string().optional() }),
   uiMessageStreamOptions: {
     // Stream the model's thinking so the chat can show it, collapsed
     sendReasoning: true,
@@ -107,8 +127,8 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
   },
   // Declared here, not only on streamText, so viewScreen's toModelOutput is
   // re-applied when earlier turns are converted back for the model
-  tools: async ({ chatId }) => {
-    const bot = await getChatBot(chatId)
+  tools: async ({ chatId, clientData }) => {
+    const { bot } = await getChatBots(chatId, clientData?.botId)
     return createSandboxTools({ chatId, sandboxId: bot.sandboxId })
   },
   // Messages sent while a reply streams join it at the next step boundary
@@ -161,9 +181,14 @@ export const chatAgent = chat.withUIMessage<ChatUIMessage>().agent({
     }
   },
   // Set every turn rather than once per run, so edits to the bot apply to the
-  // next message and continuation runs get the prompt too
-  onTurnStart: async ({ chatId }) => {
-    chat.prompt.set(buildBotPrompt(await getChatBot(chatId)))
+  // next message, continuation runs get the prompt too, and a group chat
+  // speaks as whichever bot was picked for this message
+  onTurnStart: async ({ chatId, clientData }) => {
+    const { bot, groupMates } = await getChatBots(chatId, clientData?.botId)
+    chat.prompt.set(buildBotPrompt(bot, groupMates))
+    chat.setUIMessageStreamOptions({
+      messageMetadata: () => ({ botId: bot.id }) satisfies ChatMessageMetadata,
+    })
   },
   // streamText comes from the run argument so the managed options apply,
   // including the system prompt set above

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { SearchIcon } from "lucide-react"
 
 import { ChatAvatar } from "@/components/chat-avatar"
+import { GroupChatAvatar } from "@/components/group-chat-avatar"
 import { Button } from "@/components/ui/button"
 import {
   Command,
@@ -16,7 +17,7 @@ import {
   CommandList,
 } from "@/components/ui/command"
 import { Kbd } from "@/components/ui/kbd"
-import type { ChatWithBot } from "@/queries/chats"
+import type { ChatWithBots } from "@/queries/chats"
 
 function subscribe() {
   return () => {}
@@ -32,7 +33,7 @@ function useIsApple() {
   )
 }
 
-function ChatSearch({ chats }: { chats: ChatWithBot[] }) {
+function ChatSearch({ chats }: { chats: ChatWithBots[] }) {
   const router = useRouter()
   const isApple = useIsApple()
   const [open, setOpen] = React.useState(false)
@@ -66,7 +67,7 @@ function ChatSearch({ chats }: { chats: ChatWithBot[] }) {
           like a search field while keeping the outline button's hover. */}
       <Button
         variant="outline"
-        className="h-8 w-full group-data-[collapsible=icon]:hidden min-w-0 justify-start rounded-lg border border-input bg-transparent px-2.5 py-1 text-base font-normal text-muted-foreground transition-colors outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-sm dark:bg-input/30 dark:disabled:bg-input/80 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40"
+        className="h-8 w-full min-w-0 justify-start rounded-lg border border-input bg-transparent px-2.5 py-1 text-base font-normal text-muted-foreground transition-colors outline-none group-data-[collapsible=icon]:hidden focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-sm dark:bg-input/30 dark:disabled:bg-input/80 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40"
         onClick={() => setOpen(true)}
       >
         <SearchIcon data-icon="inline-start" />
@@ -85,7 +86,7 @@ function ChatSearch({ chats }: { chats: ChatWithBot[] }) {
             <CommandEmpty>No chats found.</CommandEmpty>
             <CommandGroup heading="Chats">
               {chats.map((chat) => {
-                const name = chat.name ?? chat.bot.name
+                const name = chat.name ?? chat.bots[0].name
 
                 return (
                   <CommandItem
@@ -97,7 +98,17 @@ function ChatSearch({ chats }: { chats: ChatWithBot[] }) {
                       router.push(`/chats/${chat.id}`)
                     }}
                   >
-                    <ChatAvatar seed={chat.bot.avatar} className="size-6" />
+                    {chat.kind === "group" ? (
+                      <GroupChatAvatar
+                        seeds={chat.bots.map((bot) => bot.avatar)}
+                        className="size-6"
+                      />
+                    ) : (
+                      <ChatAvatar
+                        seed={chat.bots[0].avatar}
+                        className="size-6"
+                      />
+                    )}
                     <span className="truncate">{name}</span>
                   </CommandItem>
                 )

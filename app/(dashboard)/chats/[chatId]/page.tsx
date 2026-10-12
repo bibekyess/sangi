@@ -16,12 +16,24 @@ export default async function Page(props: PageProps<"/chats/[chatId]">) {
     notFound()
   }
 
+  // Group chats have no one computer to show, so they get the chat alone
+  if (chat.kind === "group") {
+    return (
+      <div className="flex h-svh flex-col">
+        <ChatHeader chat={chat} />
+        <Chat
+          key={chat.id}
+          chatId={chat.id}
+          bots={chat.bots.map(({ id, name, avatar }) => ({ id, name, avatar }))}
+        />
+      </div>
+    )
+  }
+
+  const [bot] = chat.bots
+
   return (
-    <ComputerPanelProvider
-      key={chat.id}
-      botId={chat.bot.id}
-      botName={chat.bot.name}
-    >
+    <ComputerPanelProvider key={chat.id} botId={bot.id} botName={bot.name}>
       {/* The group's inline height: 100% beats any class, so size its parent */}
       <div className="h-svh">
         <ResizablePanelGroup orientation="horizontal">

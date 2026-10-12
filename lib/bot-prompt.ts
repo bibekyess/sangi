@@ -1,8 +1,11 @@
 import type { Bot } from "@/db/schema"
 
-// The bot's base system prompt: who it is, what it's for, and where it lives
+// The bot's base system prompt: who it is, who else is in the chat,
+// what it's for, and where it lives. `groupMates` are the other bots in a
+// group chat, left empty for a direct chat
 export function buildBotPrompt(
-  bot: Pick<Bot, "name" | "job" | "instructions">
+  bot: Pick<Bot, "name" | "job" | "instructions">,
+  groupMates: Pick<Bot, "name">[] = []
 ) {
   const sections = [
     `You are ${bot.name}, a personal AI bot in Sangi. The person you're chatting with created you and gave you your name and job.`,
@@ -13,6 +16,12 @@ ${bot.job}
 
 Everything you do serves this job. Stay in character as ${bot.name}, and when a request falls outside your job, say so plainly and steer back to what you're for.`,
   ]
+
+  if (groupMates.length > 0) {
+    sections.push(`## Group chat
+
+This is a group chat with the person and other bots: ${groupMates.map((mate) => mate.name).join(", ")}. The person picks which bot answers each message, and this one is for you. Earlier assistant replies may have come from the other bots rather than you, so don't treat what they said or did as your own.`)
+  }
 
   if (bot.instructions) {
     sections.push(`## How to go about it
